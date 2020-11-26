@@ -836,6 +836,15 @@ void lidarOdometryOptimism(const pcl::PointCloud<PointType>::Ptr &cornerPointsSh
   ceres::Solve(options, &problem, &summary);
 }
 
+// 将激光点添加到观察列表
+void addMatchPointToViews(const std::vector<cv::KeyPoint> &keypoints_1, const std::vector<cv::KeyPoint> &keypoints_2,
+                          const cv::Mat &descriptors_1, const std::vector<cv::DMatch> &matches_stereo,
+                          const std::vector<cv::Point3d> &points_3d)
+{
+  //描述子和观察表中的描述子进行匹配
+  //
+}
+
 // 传感器消息同步处理
 void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
                     const sensor_msgs::CameraInfoConstPtr &left_cam_info_msg,
@@ -881,6 +890,9 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   std::vector<cv::Point3d> points_3d;
   normalizeHomogeneousPoints(points_4d, points_3d);
 
+  //-- 第六点一步：将激光点添加到观察列表
+  // addMatchPointToViews(keypoints_1, keypoints_2,  descriptors_1, matches_stereo, points_3d);
+
   //-- 第七步：激光点云预处理
   float startOri, endOri;
   std::vector<pcl::PointCloud<PointType>> laserCloudScans;
@@ -917,7 +929,7 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   }
   else
   {
-    //--第十步：激光里程计优化
+    //-- 第十步：激光里程计优化
     for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter)
     {
       lidarOdometryOptimism(cornerPointsSharp, surfPointsFlat, cornerPointsLast, surfPointsLast, kdtreeCornerLast,
@@ -926,6 +938,8 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
     t_w_curr = t_w_curr + q_w_curr * t_last_curr;
     q_w_curr = q_w_curr * q_last_curr;
   }
+
+  //-- 第十一步：更新最新的坐标和地图
 
   cornerPointsLast = cornerPointsLessSharp;
   surfPointsLast = surfPointsLessFlat;
