@@ -836,13 +836,14 @@ void lidarOdometryOptimism(const pcl::PointCloud<PointType>::Ptr &cornerPointsSh
   ceres::Solve(options, &problem, &summary);
 }
 
-// 将激光点添加到观察列表
+// 将激光点添加到观测列表
 void addMatchPointToViews(const std::vector<cv::KeyPoint> &keypoints_1, const std::vector<cv::KeyPoint> &keypoints_2,
                           const cv::Mat &descriptors_1, const std::vector<cv::DMatch> &matches_stereo,
                           const std::vector<cv::Point3d> &points_3d)
 {
   //描述子和观察表中的描述子进行匹配
-  //
+  //根据匹配列表为已有特征点添加观测
+  //根据未匹配列表添加新的特征点和观测
 }
 
 // 传感器消息同步处理
