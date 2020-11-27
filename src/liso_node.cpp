@@ -141,16 +141,22 @@ cv::Point2f pixel2cam(const cv::Point2d &p, const cv::Mat &K)
 }
 
 //根据匹配获得匹配点
-void filterMatchPoints(const std::vector<cv::KeyPoint> &keypoints_1, const std::vector<cv::KeyPoint> &keypoints_2,
+void filterMatchPoints(const std::vector<cv::KeyPoint> &keypoints_1, const std::vector<cv::KeyPoint> &keypoints_2, const cv::Mat &keypoints_desc1,
                        const std::vector<cv::DMatch> &matches, std::vector<cv::Point2f> &points_1,
-                       std::vector<cv::Point2f> &points_2)
+                       std::vector<cv::Point2f> &points_2, std::vector<cv::Point2f> &img_points_1,
+                       std::vector<cv::Point2f> &img_points_2, cv::Mat &descriptors_curr)
 {
   points_1.clear();
   points_2.clear();
   for (int i = 0; i < (int)matches.size(); i++)
   {
-    points_1.push_back(pixel2cam(keypoints_1[matches[i].queryIdx].pt, left_camera_matrix));
-    points_2.push_back(pixel2cam(keypoints_2[matches[i].trainIdx].pt, right_camera_matrix));
+    int query_idx = matches[i].queryIdx;
+    int train_idx = matches[i].queryIdx;
+    points_1.push_back(pixel2cam(keypoints_1[query_idx].pt, left_camera_matrix));
+    points_2.push_back(pixel2cam(keypoints_2[train_idx].pt, right_camera_matrix));
+    img_points_1.push_back(keypoints_1[query_idx].pt);
+    img_points_2.push_back(keypoints_2[train_idx].pt);
+    descriptors_curr.push_back(keypoints_desc1.row(query_idx));
   }
 }
 
@@ -843,7 +849,8 @@ void addMatchPointToViews(const std::vector<cv::KeyPoint> &keypoints_1, const st
                           cv::Mat &descriptorsInMap)
 {
   //描述子和观察表中的描述子进行匹配
-  robustMatch(descriptors_1, descriptorsInMap, std::vector<cv::DMatch> &matches);
+  std::vector<cv::DMatch> matches_map;
+  robustMatch(descriptors_1, descriptorsInMap, matches_map);
   //根据匹配列表为已有特征点添加观测
   //根据未匹配列表添加新的特征点和观测
 }
@@ -883,7 +890,9 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
 
   //-- 第四步:筛选出匹配点
   std::vector<cv::Point2f> points_1, points_2;
-  filterMatchPoints(keypoints_1, keypoints_2, matches_stereo, points_1, points_2);
+  std::vector<cv::Point2f> img_points_1, img_points_2;
+  cv::Mat descriptors_curr;
+  filterMatchPoints(keypoints_1, keypoints_2, descriptors_1, matches_stereo, points_1, points_2, img_points_1, img_points_2, descriptors_curr);
 
   //-- 第五步:三角化计算
   cv::Mat points_4d;
@@ -894,7 +903,7 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   normalizeHomogeneousPoints(points_4d, points_3d);
 
   //-- 第六点一步：将激光点添加到观察列表
-  statics cv::Mat descriptorsInMap;
+  static cv::Mat descriptors_map;
   // addMatchPointToViews(keypoints_1, keypoints_2,  descriptors_1, matches_stereo, points_3d);
 
   //-- 第七步：激光点云预处理
