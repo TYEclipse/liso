@@ -11,6 +11,15 @@ const bool DISTORTION = false;
 const double DISTANCE_SQ_THRESHOLD = 25;
 const double NEARBY_SCAN = 2.5;
 
+struct CameraView
+{
+    int camera_idx;
+    int point_idx;
+    double observation_x;
+    double observation_y;
+};
+
+
 template <typename T>
 class Accumulator
 {
