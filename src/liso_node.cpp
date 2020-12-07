@@ -75,6 +75,7 @@ static cv::Mat right_camera_matrix;
 static double stereoDistanceThresh;
 static cv::Mat base_to_left_camera_pose;
 static cv::Mat base_to_right_camera_pose;
+static cv::Mat left_camera_to_lidar_pose;
 
 //激光提取边沿点和平面点
 static Accumulator<float> curvature_range(0.1);
@@ -701,10 +702,21 @@ void lidarOdometryOptimism(const pcl::PointCloud<PointType>::Ptr &cornerPointsSh
   ceres::Solve(options, &problem, &summary);
 }
 
+void CameraPointTransform(const cv::Point3d &pi, cv::Point3d &po, Eigen::Quaterniond &q_point, Eigen::Vector3d &t_point)
+{
+  Eigen::Vector3d point(pi.x, pi.y, pi.z);
+  Eigen::Vector3d un_point = q_point * point + t_point;
+
+  po.x = un_point.x();
+  po.y = un_point.y();
+  po.z = un_point.z();
+}
+
 // 将激光点添加到观测列表
 void addMatchPointToViews(const std::vector<cv::Point2f> &points_1, const std::vector<cv::Point2f> &points_2,
-                          const cv::Mat &descriptors_1, cv::Mat &descriptorsInMap, int camera_idx,
-                          std::vector<CameraView> &camera_views)
+                          const cv::Mat &descriptors_1, const std::vector<cv::Point3d> &points_3d,
+                          cv::Mat &descriptorsInMap, int camera_idx, std::vector<CameraView> &camera_views,
+                          std::vector<cv::Point3d> &points_3d_maps)
 {
   std::cout << "addMatchPointToViews() start." << std::endl;
   //描述子和观察表中的描述子进行匹配
@@ -750,6 +762,13 @@ void addMatchPointToViews(const std::vector<cv::Point2f> &points_1, const std::v
     camera_views.push_back(view2);
 
     descriptorsInMap.push_back(descriptors_1.row(i));
+
+    cv::Point3d point = points_3d[i];
+    //把点转换到激光坐标系
+
+    //把点转换到当前坐标系
+
+    //把点添加到地图中
   }
   std::cout << "addMatchPointToViews() end." << std::endl;
 }
@@ -809,7 +828,7 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   static cv::Mat descriptors_map;
   static std::vector<CameraView> views_map;
   static std::vector<cv::Point3d> points_3d_maps;
-  addMatchPointToViews(points_1, points_1, descriptors_1, descriptors_map, frame_count, views_map);
+  addMatchPointToViews(points_1, points_1, descriptors_1, points_3d, descriptors_map, frame_count, views_map, points_3d_maps);
 
   //-- 第七步：激光点云预处理
   float startOri, endOri;
@@ -1035,10 +1054,7 @@ int main(int argc, char **argv)
 
   base_to_left_camera_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
   base_to_right_camera_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.45, 0, 1, 0, 0, 0, 0, 1, 0);
-  // left_camera_to_lidar_trans = (cv::Mat_<double>(3,4)<<
-  //   0, 0, 1, 0.06,
-  //  -1, 0, 0, 0,
-  //   0,-1, 0, 0);
+  left_camera_to_lidar_pose = (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.06, -1, 0, 0, 0, 0, -1, 0, 0);
 
   detector = cv::ORB::create();
   descriptor = cv::ORB::create();
