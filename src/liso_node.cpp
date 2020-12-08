@@ -20,10 +20,13 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
 
+#include <pcl/common/transforms.h>
 #include <pcl/filters/filter.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
 
+#include "Eigen/src/Core/Matrix.h"
+#include "Eigen/src/Geometry/Quaternion.h"
 #include "liso/CeresSolveFactor.hpp"
 #include "liso/common.h"
 
@@ -43,6 +46,7 @@ static std::string conner_points_less_pub;
 static std::string surf_points_pub;
 static std::string surf_points_less_pub;
 static std::string laser_odometry_pub;
+static std::string camera_points_clouds_pub;
 
 static std::string lidarType;
 static int N_SCAN = 16;
@@ -63,6 +67,7 @@ static ros::Publisher pubCornerPointsLessSharp;
 static ros::Publisher pubSurfPointsFlat;
 static ros::Publisher pubSurfPointsLessFlat;
 static ros::Publisher pubLaserOdometry;
+static ros::Publisher pubCameraPointsCloud;
 
 //特征提取
 static cv::Ptr<cv::FeatureDetector> detector;
@@ -73,9 +78,9 @@ static cv::Ptr<cv::DescriptorMatcher> matcher;
 static cv::Mat left_camera_matrix;
 static cv::Mat right_camera_matrix;
 static double stereoDistanceThresh;
-static cv::Mat base_to_left_camera_pose;
-static cv::Mat base_to_right_camera_pose;
-static cv::Mat left_camera_to_lidar_pose;
+static cv::Mat left_camera_to_base_pose;
+static cv::Mat right_camera_to_base_pose;
+static cv::Mat lidar_to_base_pose;
 
 //激光提取边沿点和平面点
 static Accumulator<float> curvature_range(0.1);
@@ -702,7 +707,7 @@ void lidarOdometryOptimism(const pcl::PointCloud<PointType>::Ptr &cornerPointsSh
   ceres::Solve(options, &problem, &summary);
 }
 
-void CameraPointTransform(const cv::Point3d &pi, cv::Point3d &po, Eigen::Quaterniond &q_point, Eigen::Vector3d &t_point)
+void CvPointTransform(const cv::Point3d &pi, cv::Point3d &po, Eigen::Quaterniond &q_point, Eigen::Vector3d &t_point)
 {
   Eigen::Vector3d point(pi.x, pi.y, pi.z);
   Eigen::Vector3d un_point = q_point * point + t_point;
@@ -749,8 +754,16 @@ void addMatchPointToViews(const std::vector<cv::Point2f> &points_1, const std::v
   //根据未匹配列表添加新的特征点和观测
   for (size_t i = 0; i < choosen_flag.size(); i++)
   {
+    //是否已匹配
     if (choosen_flag[i])
       continue;
+
+    cv::Point3d point = points_3d[i];
+    cv::Mat pt_trans = left_camera_to_base_pose * (cv::Mat_<double>(4, 1) << point.x, point.y, point.z, 1);
+    double depth = pt_trans.at<double>(2, 0);
+    if (depth > stereoDistanceThresh || depth < 0.54)
+      continue;
+
     view1.point_idx = descriptorsInMap.rows;
     view1.observation_x = points_1[i].x;
     view1.observation_y = points_1[i].y;
@@ -763,14 +776,25 @@ void addMatchPointToViews(const std::vector<cv::Point2f> &points_1, const std::v
 
     descriptorsInMap.push_back(descriptors_1.row(i));
 
-    cv::Point3d point = points_3d[i];
-    //把点转换到激光坐标系
-
-    //把点转换到当前坐标系
-
-    //把点添加到地图中
+    //把点转换到地图坐标系
+    CvPointTransform(point, point, q_w_curr, t_w_curr);
+    //把点添加到地图特征点集中
+    points_3d_maps.push_back(point);
   }
   std::cout << "addMatchPointToViews() end." << std::endl;
+}
+
+void addPoints3DToCloud(const std::vector<cv::Point3d> &points_3d_maps,
+                        const pcl::PointCloud<PointType>::Ptr &points_3d_clouds)
+{
+  for (auto point : points_3d_maps)
+  {
+    PointType pointSel;
+    pointSel.x = point.x;
+    pointSel.y = point.y;
+    pointSel.z = point.z;
+    points_3d_clouds->push_back(pointSel);
+  }
 }
 
 // 传感器消息同步处理
@@ -818,17 +842,22 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
 
   //-- 第五步:三角化计算
   cv::Mat points_4d;
-  cv::triangulatePoints(base_to_left_camera_pose, base_to_right_camera_pose, points_1, points_2, points_4d);
+  cv::triangulatePoints(left_camera_to_base_pose, right_camera_to_base_pose, points_1, points_2, points_4d);
 
   //-- 第六步:齐次三维点归一化
   std::vector<cv::Point3d> points_3d;
   normalizeHomogeneousPoints(points_4d, points_3d);
 
-  //-- 第六点一步：将激光点添加到观察列表
+  //-- 第六点一步：将特征点添加到观察列表
   static cv::Mat descriptors_map;
   static std::vector<CameraView> views_map;
   static std::vector<cv::Point3d> points_3d_maps;
-  addMatchPointToViews(points_1, points_1, descriptors_1, points_3d, descriptors_map, frame_count, views_map, points_3d_maps);
+  addMatchPointToViews(points_1, points_1, descriptors_1, points_3d, descriptors_map, frame_count, views_map,
+                       points_3d_maps);
+
+  //-- 第六点二步：将特征点添加到点云中
+  pcl::PointCloud<PointType>::Ptr points_3d_clouds(new pcl::PointCloud<PointType>);
+  addPoints3DToCloud(points_3d_maps, points_3d_clouds);
 
   //-- 第七步：激光点云预处理
   float startOri, endOri;
@@ -836,12 +865,22 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   pcl::PointCloud<PointType> laserCloudOut;
   std::vector<int> scanStartInd, scanEndInd;
 
+  //消除无意义点和距离为零的点
   pcl::removeNaNFromPointCloud(*laserCloudIn, *laserCloudIn, indices);
   removeClosedPointCloud(*laserCloudIn, *laserCloudIn, MINIMUM_RANGE);
-  readPointCloudOrient(*laserCloudIn, startOri, endOri);
+
+  readPointCloudOrient(*laserCloudIn, startOri, endOri);  //计算点云角度范围
   parsePointCloudScans(*laserCloudIn, laserCloudScans, startOri, endOri);
   generateFromPointCloudScans(laserCloudScans, laserCloudOut, scanStartInd, scanEndInd);
   calculatePointCurvature(laserCloudOut);
+
+  //
+  Eigen::Matrix3d q_mat;
+  q_mat << 0, -1, 0, 0, 0, -1, 1, 0, 0;
+  Eigen::Vector3d t_vec;
+  t_vec << 0, -0.08, -0.27;
+  Eigen::Quaterniond q_quat(q_mat);
+  pcl::transformPointCloud(laserCloudOut, laserCloudOut, t_vec, q_quat);
 
   //-- 第八步：点云分割点云
   pcl::PointCloud<PointType>::Ptr cornerPointsSharp(new pcl::PointCloud<PointType>);
@@ -874,6 +913,11 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
     }
     t_w_curr = t_w_curr + q_w_curr * t_last_curr;
     q_w_curr = q_w_curr * q_last_curr;
+    //把位移保存到位姿列表和
+
+    
+    //-- 第十一步：视觉BA优化
+
   }
 
   //-- 第十一步：更新最新的坐标和地图
@@ -894,9 +938,9 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   {
     // 第二个图
     cv::Mat pt_trans1 =
-        base_to_left_camera_pose * (cv::Mat_<double>(4, 1) << points_3d[i].x, points_3d[i].y, points_3d[i].z, 1);
+        left_camera_to_base_pose * (cv::Mat_<double>(4, 1) << points_3d[i].x, points_3d[i].y, points_3d[i].z, 1);
     cv::Mat pt_trans2 =
-        base_to_right_camera_pose * (cv::Mat_<double>(4, 1) << points_3d[i].x, points_3d[i].y, points_3d[i].z, 1);
+        right_camera_to_base_pose * (cv::Mat_<double>(4, 1) << points_3d[i].x, points_3d[i].y, points_3d[i].z, 1);
     float depth1 = pt_trans1.at<double>(2, 0);
     float depth2 = pt_trans2.at<double>(2, 0);
     // if (depth1>0 && depth2>0)
@@ -934,6 +978,11 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   laserCloudOutput.header.stamp = point_cloud_msg->header.stamp;
   laserCloudOutput.header.frame_id = point_cloud_msg->header.frame_id;
   pubSurfPointsLessFlat.publish(laserCloudOutput);
+
+  pcl::toROSMsg(*points_3d_clouds, laserCloudOutput);
+  laserCloudOutput.header.stamp = point_cloud_msg->header.stamp;
+  laserCloudOutput.header.frame_id = "/velo_init";
+  pubCameraPointsCloud.publish(laserCloudOutput);
 
   // publish odometry
   nav_msgs::Odometry laserOdometry;
@@ -1027,6 +1076,7 @@ int main(int argc, char **argv)
   nh.param<std::string>("surf_points_pub", surf_points_pub, "/surf_points_pub");
   nh.param<std::string>("surf_points_less_pub", surf_points_less_pub, "/surf_points_less_pub");
   nh.param<std::string>("laser_odometry_pub", laser_odometry_pub, "/laser_odometry_pub");
+  nh.param<std::string>("camera_points_clouds_pub", camera_points_clouds_pub, "/camera_points_clouds_pub");
 
   // 雷达参数
   nh.param<std::string>("lidar_type", lidarType, "HDL-64E");
@@ -1050,11 +1100,11 @@ int main(int argc, char **argv)
   left_camera_matrix = (cv::Mat_<double>(3, 3) << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0);
   right_camera_matrix = (cv::Mat_<double>(3, 3) << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0);
 
-  stereoDistanceThresh = 718.856 * 0.45 * 2;
+  stereoDistanceThresh = 718.856 * 0.54 * 2;
 
-  base_to_left_camera_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
-  base_to_right_camera_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.45, 0, 1, 0, 0, 0, 0, 1, 0);
-  left_camera_to_lidar_pose = (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.06, -1, 0, 0, 0, 0, -1, 0, 0);
+  left_camera_to_base_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
+  right_camera_to_base_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0);
+  lidar_to_base_pose = (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
 
   detector = cv::ORB::create();
   descriptor = cv::ORB::create();
@@ -1068,6 +1118,7 @@ int main(int argc, char **argv)
   pubSurfPointsFlat = nh.advertise<sensor_msgs::PointCloud2>(surf_points_pub, 10);
   pubSurfPointsLessFlat = nh.advertise<sensor_msgs::PointCloud2>(surf_points_less_pub, 10);
   pubLaserOdometry = nh.advertise<nav_msgs::Odometry>(laser_odometry_pub, 10);
+  pubCameraPointsCloud = nh.advertise<sensor_msgs::PointCloud2>(camera_points_clouds_pub, 10);
 
   ros::spin();
 
