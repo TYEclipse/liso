@@ -75,8 +75,8 @@ static cv::Ptr<cv::DescriptorExtractor> descriptor;
 static cv::Ptr<cv::DescriptorMatcher> matcher;
 
 //相机参数
-static cv::Mat left_camera_matrix;
-static cv::Mat right_camera_matrix;
+static Eigen::Matrix3d left_camera_matrix;
+static Eigen::Matrix3d right_camera_matrix;
 static double stereoDistanceThresh;
 static cv::Mat left_camera_to_base_pose;
 static cv::Mat right_camera_to_base_pose;
@@ -129,9 +129,9 @@ float normalizeHomogeneousPoints(const cv::Mat &points_4d, std::vector<cv::Point
 }
 
 // 转换像素点
-cv::Point2f pixel2cam(const cv::Point2d &p, const cv::Mat &K)
+cv::Point2f pixel2cam(const cv::Point2d &p, const Eigen::Matrix3d &K)
 {
-  return cv::Point2f((p.x - K.at<double>(0, 2)) / K.at<double>(0, 0), (p.y - K.at<double>(1, 2)) / K.at<double>(1, 1));
+  return cv::Point2f((p.x - K(0, 2)) / K(0, 0), (p.y - K(1, 2)) / K(1, 1));
 }
 
 //根据匹配获得匹配点
@@ -721,7 +721,7 @@ void CvPointTransform(const cv::Point3d &pi, cv::Point3d &po, Eigen::Quaterniond
 void addMatchPointToViews(const std::vector<cv::Point2f> &points_1, const std::vector<cv::Point2f> &points_2,
                           const cv::Mat &descriptors_1, const std::vector<cv::Point3d> &points_3d,
                           cv::Mat &descriptorsInMap, int camera_idx, std::vector<CameraView> &camera_views,
-                          std::vector<cv::Point3d> &points_3d_maps)
+                          std::vector<Eigen::Vector3d> &points_3d_maps)
 {
   std::cout << "addMatchPointToViews() start." << std::endl;
   //描述子和观察表中的描述子进行匹配
@@ -745,7 +745,7 @@ void addMatchPointToViews(const std::vector<cv::Point2f> &points_1, const std::v
       view2.point_idx = matches_map[i].trainIdx;
       view2.observation_x = points_2[matches_map[i].queryIdx].x;
       view2.observation_y = points_2[matches_map[i].queryIdx].y;
-      camera_views.push_back(view1);
+      // camera_views.push_back(view1);
 
       descriptorsInMap.row(matches_map[i].trainIdx) = descriptors_1.row(matches_map[i].queryIdx);
       choosen_flag[i] = true;
@@ -772,27 +772,31 @@ void addMatchPointToViews(const std::vector<cv::Point2f> &points_1, const std::v
     view2.point_idx = descriptorsInMap.rows;
     view2.observation_x = points_2[i].x;
     view2.observation_y = points_2[i].y;
-    camera_views.push_back(view2);
+    // camera_views.push_back(view2);
 
     descriptorsInMap.push_back(descriptors_1.row(i));
 
     //把点转换到地图坐标系
     CvPointTransform(point, point, q_w_curr, t_w_curr);
     //把点添加到地图特征点集中
-    points_3d_maps.push_back(point);
+    Eigen::Vector3d point_temp;
+    point_temp.x() = point.x;
+    point_temp.y() = point.y;
+    point_temp.z() = point.z;
+    points_3d_maps.push_back(point_temp);
   }
   std::cout << "addMatchPointToViews() end." << std::endl;
 }
 
-void addPoints3DToCloud(const std::vector<cv::Point3d> &points_3d_maps,
+void addPoints3DToCloud(const std::vector<Eigen::Vector3d> &points_3d_maps,
                         const pcl::PointCloud<PointType>::Ptr &points_3d_clouds)
 {
   for (auto point : points_3d_maps)
   {
     PointType pointSel;
-    pointSel.x = point.x;
-    pointSel.y = point.y;
-    pointSel.z = point.z;
+    pointSel.x = point.x();
+    pointSel.y = point.y();
+    pointSel.z = point.z();
     points_3d_clouds->push_back(pointSel);
   }
 }
@@ -851,8 +855,8 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   //-- 第六点一步：将特征点添加到观察列表
   static cv::Mat descriptors_map;
   static std::vector<CameraView> views_map;
-  static std::vector<cv::Point3d> points_3d_maps;
-  addMatchPointToViews(points_1, points_1, descriptors_1, points_3d, descriptors_map, frame_count, views_map,
+  static std::vector<Eigen::Vector3d> points_3d_maps;
+  addMatchPointToViews(points_1, points_2, descriptors_1, points_3d, descriptors_map, frame_count, views_map,
                        points_3d_maps);
 
   //-- 第六点二步：将特征点添加到点云中
@@ -874,7 +878,7 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   generateFromPointCloudScans(laserCloudScans, laserCloudOut, scanStartInd, scanEndInd);
   calculatePointCurvature(laserCloudOut);
 
-  //
+  //将点云转换到基准坐标系
   Eigen::Matrix3d q_mat;
   q_mat << 0, -1, 0, 0, 0, -1, 1, 0, 0;
   Eigen::Vector3d t_vec;
@@ -898,10 +902,19 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   static pcl::KdTreeFLANN<PointType>::Ptr kdtreeCornerLast(new pcl::KdTreeFLANN<PointType>());
   static pcl::KdTreeFLANN<PointType>::Ptr kdtreeSurfLast(new pcl::KdTreeFLANN<PointType>());
 
+  static std::vector<Eigen::Quaterniond> qlist_map_curr;
+  static std::vector<Eigen::Quaterniond> qlist_last_curr;
+  static std::vector<Eigen::Vector3d> tlist_map_curr;
+  static std::vector<Eigen::Vector3d> tlist_last_curr;
+
   if (!isSystemInitial)
   {
     // 初始化
     isSystemInitial = true;
+    qlist_map_curr.push_back(q_w_curr);
+    qlist_last_curr.push_back(q_last_curr);
+    tlist_map_curr.push_back(t_w_curr);
+    tlist_last_curr.push_back(t_last_curr);
   }
   else
   {
@@ -913,11 +926,74 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
     }
     t_w_curr = t_w_curr + q_w_curr * t_last_curr;
     q_w_curr = q_w_curr * q_last_curr;
-    //把位移保存到位姿列表和
 
-    
+    //保存到位姿列表和唯一列表
+    //用于设置初始位姿
+    qlist_map_curr.push_back(q_w_curr);
+    tlist_map_curr.push_back(t_w_curr);
+    //用于添加约束
+    qlist_last_curr.push_back(q_last_curr);
+    tlist_last_curr.push_back(t_last_curr);
+
     //-- 第十一步：视觉BA优化
+    for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter)
+    {
+      size_t cameraPoseNum = qlist_map_curr.size();
+      size_t cameraPointNum = points_3d_maps.size();
+      size_t cameraViewNum = views_map.size();
+      int cameraPose_correspondence = 0;
+      int cameraPoint_correspondence = 0;
 
+      ceres::LossFunction *loss_function1 = new ceres::HuberLoss(1);
+      ceres::LossFunction *loss_function2 = new ceres::HuberLoss(0.1);
+      ceres::LocalParameterization *q_parameterization = new ceres::EigenQuaternionParameterization();
+      ceres::Problem::Options problem_options;
+      ceres::Problem problem(problem_options);
+
+      //添加相机位姿和参数
+      for (size_t i = 1; i < cameraPoseNum; ++i)
+      {
+        //初始化,q.coeffs().data() = (x,y,z,w),t.data() = (x,y,z)
+        problem.AddParameterBlock(tlist_map_curr[i].data(), 3);
+        problem.AddParameterBlock(qlist_map_curr[i].coeffs().data(), 4, q_parameterization);
+
+        //添加约束
+        ceres::CostFunction *cost_function = PoseGraph3dFactor::Create(qlist_last_curr[i], tlist_last_curr[i]);
+        problem.AddResidualBlock(cost_function, loss_function1, tlist_last_curr[i - 1].data(),
+                                 qlist_last_curr[i - 1].coeffs().data(), tlist_last_curr[i].data(),
+                                 qlist_last_curr[i].coeffs().data());
+        cameraPose_correspondence++;
+      }
+
+      ceres::CostFunction *cost_function = PoseGraph3dFactor::Create(qlist_last_curr[0], tlist_last_curr[0]);
+      problem.AddResidualBlock(cost_function, loss_function1, tlist_last_curr[0].data(),
+                               qlist_last_curr[0].coeffs().data(), tlist_last_curr[0].data(),
+                               qlist_last_curr[0].coeffs().data());
+
+      //添加特征点位姿并初始化
+      for (size_t i = 0; i < cameraPointNum; ++i)
+      {
+        problem.AddParameterBlock(points_3d_maps[i].data(), 3);
+      }
+
+      //添加特征点约束
+      for (size_t i = 1; i < cameraViewNum; ++i)
+      {
+        ceres::CostFunction *cost_function =
+            ReprojectionError::Create(views_map[i].observation_x, views_map[i].observation_y, left_camera_matrix);
+        problem.AddResidualBlock(cost_function, loss_function2, tlist_last_curr[views_map[i].camera_idx / 2].data(),
+                                 qlist_last_curr[views_map[i].camera_idx / 2].coeffs().data(),
+                                 points_3d_maps[views_map[i].point_idx].data());
+        cameraPose_correspondence++;
+      }
+
+      ceres::Solver::Options options;
+      options.linear_solver_type = ceres::DENSE_QR;
+      options.max_num_iterations = 4;
+      options.minimizer_progress_to_stdout = true;
+      ceres::Solver::Summary summary;
+      ceres::Solve(options, &problem, &summary);
+    }
   }
 
   //-- 第十一步：更新最新的坐标和地图
@@ -1097,8 +1173,8 @@ int main(int argc, char **argv)
   sync.registerCallback(boost::bind(&callbackHandle, _1, _2, _3, _4, _5));
 
   // 传感器参数
-  left_camera_matrix = (cv::Mat_<double>(3, 3) << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0);
-  right_camera_matrix = (cv::Mat_<double>(3, 3) << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0);
+  left_camera_matrix << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0;
+  right_camera_matrix << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0;
 
   stereoDistanceThresh = 718.856 * 0.54 * 2;
 
