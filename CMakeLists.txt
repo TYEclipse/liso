@@ -15,14 +15,13 @@ find_package(catkin COMPONENTS
 
 find_package(OpenCV REQUIRED)
 Find_Package(Ceres REQUIRED)
-find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
   CATKIN_DEPENDS std_msgs roscpp rospy sensor_msgs message_filters nav_msgs cv_bridge
 #  LIBRARIES liso
-  DEPENDS  EIGEN3 PCL
+  DEPENDS PCL
 )
 
 include_directories(
