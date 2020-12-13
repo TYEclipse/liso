@@ -2,6 +2,7 @@
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
+#include <iostream>
 
 struct LidarEdgeFactor
 {
@@ -151,6 +152,10 @@ struct ReprojectionError
   {
 	focal_x = camera_matrix(0, 0);
 	focal_y = camera_matrix(1, 1);
+	drift_x = camera_matrix(0, 2);
+	drift_y = camera_matrix(1, 2);
+
+	// printf("observed = ( %f , %f )\n", observed_x, observed_y);
   }
 
   // q_Quaternion(x, y, z, w), p_Vector3d(x,y,z),point(x,y)
@@ -161,6 +166,8 @@ struct ReprojectionError
 	Eigen::Map<const Eigen::Quaternion<T>> q_pose(q_ptr);
 	Eigen::Map<const Eigen::Matrix<T, 3, 1>> point(point_ptr);
 
+	// printf("point_ptr = ( %f , %f , %f )\n", point.x(), point.y(), point.z());
+
 	//将点从地图坐标系转换到世界坐标系
 	T p[3];
 	ceres::QuaternionRotatePoint(q_ptr, point_ptr, p);
@@ -169,11 +176,17 @@ struct ReprojectionError
 	p[2] += p_ptr[2];
 
 	//求出与相机坐标系的夹角
-	T xp = -p[0] / p[2];
-	T yp = -p[1] / p[2];
+	T xp = p[0] / p[2];
+	T yp = p[1] / p[2];
 
-	residuals[0] = focal_x * xp - T(observed_x);
-	residuals[1] = focal_y * yp - T(observed_y);
+	xp = focal_x * xp + drift_x;
+	yp = focal_y * yp + drift_y;
+
+	residuals[0] = xp - T(observed_x);
+	residuals[1] = yp - T(observed_y);
+
+	// printf("predict = ( %f , %f )\n", xp, yp);
+	// printf("observed = ( %f , %f )\n", observed_x, observed_y);
 
 	return true;
   }
@@ -187,5 +200,5 @@ struct ReprojectionError
 
   Eigen::Matrix3d camera_matrix;
 
-  double observed_x, observed_y, focal_x, focal_y;
+  double observed_x, observed_y, focal_x, focal_y, drift_x, drift_y;
 };
