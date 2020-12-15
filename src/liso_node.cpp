@@ -700,13 +700,22 @@ void lidarOdometryOptimism(const pcl::PointCloud<PointType>::Ptr &cornerPointsSh
     printf("less correspondence! "
            "*************************************************\n");
   }
-
+  static int max_num_iter = 4;
   ceres::Solver::Options options;
   options.linear_solver_type = ceres::DENSE_QR;
-  options.max_num_iterations = 4;
-  options.minimizer_progress_to_stdout = false;
+  options.max_num_iterations = max_num_iter;
+  options.minimizer_progress_to_stdout = true;
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
+
+  double solve_efficiency = (1. - summary.final_cost / summary.initial_cost) / max_num_iter;
+  if (solve_efficiency > 0.05)
+    max_num_iter = max_num_iter + 1;
+  if (solve_efficiency < 0.01)
+    max_num_iter = max_num_iter - 1;
+  if (max_num_iter < 2)
+    max_num_iter = 2;
+  printf("solve_efficiency = %f %%, max_num_iter = %d.\n", solve_efficiency * 100, max_num_iter);
 }
 
 void CvPointTransform(const cv::Point3d &pi, cv::Point3d &po, Eigen::Quaterniond &q_point, Eigen::Vector3d &t_point)
@@ -965,7 +974,7 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
       ceres::Problem::Options problem_options;
       ceres::Problem problem(problem_options);
 
-      printf("添加相机位姿和参数\n");
+      // printf("添加相机位姿和参数\n");
 
       // //添加相机位姿和参数
       // for (size_t i = 0; i < cameraPoseNum; ++i)
@@ -1001,7 +1010,7 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
       problem.SetParameterBlockConstant(tlist_map_curr[0].data());
       problem.SetParameterBlockConstant(qlist_map_curr[0].coeffs().data());
 
-      printf("添加特征点位姿并初始化\n");
+      // printf("添加特征点位姿并初始化\n");
       // //添加特征点位姿并初始化
       // for (size_t i = 0; i < cameraPointNum; ++i)
       // {
@@ -1009,30 +1018,36 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
       // }
 
       //添加特征点约束
+      std::vector<CameraView> new_views_map;
       for (size_t i = 1; i < cameraViewNum; ++i)
       {
-        // double *p_ptr = tlist_map_curr[views_map[i].camera_idx / 2].data();
-        // double *q_ptr = qlist_map_curr[views_map[i].camera_idx / 2].coeffs().data();
-        // double *point_ptr = points_3d_maps[views_map[i].point_idx].data();
+        double *p_ptr = tlist_map_curr[views_map[i].camera_idx / 2].data();
+        double *q_ptr = qlist_map_curr[views_map[i].camera_idx / 2].coeffs().data();
+        double *point_ptr = points_3d_maps[views_map[i].point_idx].data();
 
         // printf("p_ptr = ( %f , %f , %f )", p_ptr[0], p_ptr[1], p_ptr[2]);
         // printf("q_ptr = ( %f , %f , %f )", q_ptr[0], q_ptr[1], q_ptr[2]);
         // printf("point_ptr = ( %f , %f , %f )", point_ptr[0], point_ptr[1], point_ptr[2]);
 
-        // double p[3];
-        // ceres::QuaternionRotatePoint(q_ptr, point_ptr, p);
-        // p[0] += p_ptr[0];
-        // p[1] += p_ptr[1];
-        // p[2] += p_ptr[2];
+        double p[3];
+        ceres::QuaternionRotatePoint(q_ptr, point_ptr, p);
+        p[0] += p_ptr[0];
+        p[1] += p_ptr[1];
+        p[2] += p_ptr[2];
 
+        if (p[2] > stereoDistanceThresh || p[2] < 0.54)
+          continue;
         // printf("p = ( %f , %f , %f )", p[0], p[1], p[2]);
 
-        // //求出与相机坐标系的夹角
-        // double xp = p[0] / p[2];
-        // double yp = p[1] / p[2];
+        //求出与相机坐标系的夹角
+        double xp = p[0] / p[2];
+        double yp = p[1] / p[2];
 
-        // xp = 718.856 * xp + 607.1928;
-        // yp = 718.856 * yp + 185.2157;
+        xp = 718.856 * xp + 607.1928;
+        yp = 718.856 * yp + 185.2157;
+
+        if (xp >= image_size.x || yp >= image_size.y || xp <= 1 || yp <= 1)
+          continue;
 
         // printf("predict = ( %f , %f )\n", xp, yp);
         // printf("observed = ( %f , %f )\n", views_map[i].observation_x, views_map[i].observation_y);
@@ -1042,17 +1057,31 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
         problem.AddResidualBlock(cost_function, loss_function2, tlist_map_curr[views_map[i].camera_idx / 2].data(),
                                  qlist_map_curr[views_map[i].camera_idx / 2].coeffs().data(),
                                  points_3d_maps[views_map[i].point_idx].data());
+
+        new_views_map.push_back(views_map[i]);
         cameraPoint_correspondence++;
       }
-
       printf("cameraPose_correspondence %d, cameraPoint_correspondence %d \n", cameraPose_correspondence,
              cameraPoint_correspondence);
+
+      static int max_num_iter = 4;
       ceres::Solver::Options options;
       options.linear_solver_type = ceres::DENSE_QR;
-      options.max_num_iterations = 4;
+      options.max_num_iterations = max_num_iter;
       options.minimizer_progress_to_stdout = true;
       ceres::Solver::Summary summary;
       ceres::Solve(options, &problem, &summary);
+
+      views_map = new_views_map;
+
+      double solve_efficiency = (1. - summary.final_cost / summary.initial_cost) / max_num_iter;
+      if (solve_efficiency > 0.05)
+        max_num_iter = max_num_iter + 1;
+      if (solve_efficiency < 0.01)
+        max_num_iter = max_num_iter - 1;
+      if (max_num_iter < 2)
+        max_num_iter = 2;
+      printf("solve_efficiency = %f %%, max_num_iter = %d.\n", solve_efficiency * 100, max_num_iter);
     }
   }
 
