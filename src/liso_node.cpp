@@ -1,9 +1,9 @@
-#include <algorithm>
-#include <iostream>
-#include <opencv2/core/types.hpp>
-#include <ostream>
-#include <string>
-#include <vector>
+// Copyright 2013, Ji Zhang, Carnegie Mellon University
+
+#include <pcl/common/transforms.h>
+#include <pcl/filters/filter.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/kdtree/kdtree_flann.h>
 
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
@@ -17,14 +17,17 @@
 #include <tf/transform_broadcaster.h>
 #include <tf/transform_datatypes.h>
 
+#include <algorithm>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core/core.hpp>
+#include <opencv2/core/types.hpp>
 #include <opencv2/features2d/features2d.hpp>
-
-#include <pcl/common/transforms.h>
-#include <pcl/filters/filter.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/kdtree/kdtree_flann.h>
 
 #include "Eigen/src/Core/Matrix.h"
 #include "Eigen/src/Geometry/Quaternion.h"
@@ -34,22 +37,9 @@
 //全局变量
 
 //参数
-static std::string left_image_sub;
-static std::string left_camera_info_sub;
-static std::string right_image_sub;
-static std::string right_camera_info_sub;
-static std::string point_cloud_sub;
 
-static std::string left_image_with_feature_pub;
-static std::string point_cloud_with_feature_pub;
-static std::string conner_points_pub;
-static std::string conner_points_less_pub;
-static std::string surf_points_pub;
-static std::string surf_points_less_pub;
-static std::string laser_odometry_pub;
-static std::string camera_points_clouds_pub;
+using cv::Mat;
 
-static std::string lidarType;
 static int N_SCAN = 16;
 static float MAX_RANGE = 100;
 static float MIN_RANGE = 0;
@@ -102,6 +92,14 @@ Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);
 Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
 Eigen::Vector3d t_w_curr(0, 0, 0);
 
+static sensor_msgs::Image left_image_msg_buf;
+static sensor_msgs::CameraInfo left_cam_info_msg_buf;
+static sensor_msgs::Image right_image_msg_buf;
+static sensor_msgs::CameraInfo right_cam_info_msg_buf;
+static sensor_msgs::PointCloud2 point_cloud_msg_buf;
+static std::mutex msg_update_mutex;
+static bool is_msg_updated;
+
 inline cv::Scalar get_color(float depth)
 {
   static Accumulator<float> depth_range(50);
@@ -116,7 +114,7 @@ inline cv::Scalar get_color(float depth)
 }
 
 // 归一化齐次点
-float normalizeHomogeneousPoints(const cv::Mat &points_4d, std::vector<cv::Point3d> &points_3d)
+float normalizeHomogeneousPoints(const Mat &points_4d, std::vector<cv::Point3d> &points_3d)
 {
   Accumulator<float> scale_count;
   for (int i = 0; i < points_4d.cols; i++)
@@ -836,353 +834,20 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
 {
   ROS_INFO("callbackLeftImage Start\n");
 
-  //-- 第零步：读取图像和点云
-  static int frame_count = -2;
-  frame_count += 2;
-  cv_bridge::CvImage cv_ptr_1, cv_ptr_2;
-  cv_ptr_1 = *cv_bridge::toCvCopy(left_image_msg, left_image_msg->encoding);
-  cv_ptr_2 = *cv_bridge::toCvCopy(right_image_msg, right_image_msg->encoding);
-  image_size = cv::Point2i(cv_ptr_1.image.cols - 1, cv_ptr_1.image.rows - 1);
-
-  pcl::PointCloud<pcl::PointXYZ>::Ptr laserCloudIn(new pcl::PointCloud<pcl::PointXYZ>);
-  pcl::fromROSMsg(*point_cloud_msg, *laserCloudIn);
-  std::vector<int> indices;
-
-  //-- 第一步:检测 Oriented FAST 角点位置
-  std::vector<cv::KeyPoint> keypoints_1, keypoints_2;
-  detector->detect(cv_ptr_1.image, keypoints_1);
-  detector->detect(cv_ptr_2.image, keypoints_2);
-
-  //-- 第二步:根据角点位置计算 BRIEF 描述子
-  cv::Mat descriptors_1, descriptors_2;
-  descriptor->compute(cv_ptr_1.image, keypoints_1, descriptors_1);
-  descriptor->compute(cv_ptr_2.image, keypoints_2, descriptors_2);
-
-  //-- 第三步:对两幅图像中的BRIEF描述子进行匹配，使用 Hamming 距离
-  std::vector<cv::DMatch> matches_stereo;
-  robustMatch(descriptors_1, descriptors_2, matches_stereo);
-  // cv::drawKeypoints(cv_ptr.image, keypoints, cv_ptr.image,
-  // cv::Scalar::all(-1), cv::DrawMatchesFlags::DEFAULT);
-
-  //-- 第四步:筛选出匹配点
-  std::vector<cv::Point2f> points_1, points_2;
-  std::vector<cv::Point2f> img_points_1, img_points_2;
-  cv::Mat descriptors_curr;
-  filterMatchPoints(keypoints_1, keypoints_2, descriptors_1, matches_stereo, points_1, points_2, img_points_1,
-                    img_points_2, descriptors_curr);
-
-  //-- 第五步:三角化计算
-  cv::Mat points_4d;
-  cv::triangulatePoints(left_camera_to_base_pose, right_camera_to_base_pose, points_1, points_2, points_4d);
-
-  //-- 第六步:齐次三维点归一化
-  std::vector<cv::Point3d> points_3d;
-  normalizeHomogeneousPoints(points_4d, points_3d);
-
-  //-- 第六点一步：将特征点添加到观察列表
-  static cv::Mat descriptors_map;
-  static std::vector<CameraView> views_map;
-  static std::vector<Eigen::Vector3d> points_3d_maps;
-  addMatchPointToViews(img_points_1, img_points_2, descriptors_1, points_3d, descriptors_map, frame_count, views_map,
-                       points_3d_maps);
-
-  //-- 第七步：激光点云预处理
-  float startOri, endOri;
-  std::vector<pcl::PointCloud<PointType>> laserCloudScans;
-  pcl::PointCloud<PointType> laserCloudOut;
-  std::vector<int> scanStartInd, scanEndInd;
-
-  //消除无意义点和距离为零的点
-  pcl::removeNaNFromPointCloud(*laserCloudIn, *laserCloudIn, indices);
-  removeClosedPointCloud(*laserCloudIn, *laserCloudIn, MINIMUM_RANGE);
-
-  readPointCloudOrient(*laserCloudIn, startOri, endOri);  //计算点云角度范围
-  parsePointCloudScans(*laserCloudIn, laserCloudScans, startOri, endOri);
-  generateFromPointCloudScans(laserCloudScans, laserCloudOut, scanStartInd, scanEndInd);
-  calculatePointCurvature(laserCloudOut);
-
-  //将点云转换到基准坐标系
-  Eigen::Matrix3d q_mat;
-  q_mat << 0, -1, 0, 0, 0, -1, 1, 0, 0;
-  Eigen::Vector3d t_vec;
-  t_vec << 0, -0.08, -0.27;
-  Eigen::Quaterniond q_quat(q_mat);
-  pcl::transformPointCloud(laserCloudOut, laserCloudOut, t_vec, q_quat);
-
-  //-- 第八步：点云分割点云
-  pcl::PointCloud<PointType>::Ptr cornerPointsSharp(new pcl::PointCloud<PointType>);
-  pcl::PointCloud<PointType>::Ptr cornerPointsLessSharp(new pcl::PointCloud<PointType>);
-  pcl::PointCloud<PointType>::Ptr surfPointsFlat(new pcl::PointCloud<PointType>);
-  pcl::PointCloud<PointType>::Ptr surfPointsLessFlat(new pcl::PointCloud<PointType>);
-  segmentSurfAndConner(scanStartInd, scanEndInd, laserCloudOut, cornerPointsSharp, cornerPointsLessSharp,
-                       surfPointsFlat, surfPointsLessFlat);
-
-  //-- 第九步：定位初始化
-  static bool isSystemInitial = false;
-
-  static pcl::PointCloud<PointType>::Ptr cornerPointsLast(new pcl::PointCloud<PointType>);
-  static pcl::PointCloud<PointType>::Ptr surfPointsLast(new pcl::PointCloud<PointType>);
-  static pcl::KdTreeFLANN<PointType>::Ptr kdtreeCornerLast(new pcl::KdTreeFLANN<PointType>());
-  static pcl::KdTreeFLANN<PointType>::Ptr kdtreeSurfLast(new pcl::KdTreeFLANN<PointType>());
-
-  static std::vector<Eigen::Quaterniond> qlist_map_curr;
-  static std::vector<Eigen::Quaterniond> qlist_last_curr;
-  static std::vector<Eigen::Vector3d> tlist_map_curr;
-  static std::vector<Eigen::Vector3d> tlist_last_curr;
-
-  if (!isSystemInitial)
-  {
-    // 初始化
-    isSystemInitial = true;
-    qlist_map_curr.push_back(q_w_curr);
-    qlist_last_curr.push_back(q_last_curr);
-    tlist_map_curr.push_back(t_w_curr);
-    tlist_last_curr.push_back(t_last_curr);
-  }
-  else
-  {
-    //-- 第十步：激光里程计优化
-    for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter)
-    {
-      lidarOdometryOptimism(cornerPointsSharp, surfPointsFlat, cornerPointsLast, surfPointsLast, kdtreeCornerLast,
-                            kdtreeSurfLast, para_q, para_t);
-    }
-    t_w_curr = t_w_curr + q_w_curr * t_last_curr;
-    q_w_curr = q_w_curr * q_last_curr;
-
-    //保存到位姿列表和唯一列表
-    //用于设置初始位姿
-    qlist_map_curr.push_back(q_w_curr);
-    tlist_map_curr.push_back(t_w_curr);
-    //用于添加约束
-    qlist_last_curr.push_back(q_last_curr);
-    tlist_last_curr.push_back(t_last_curr);
-
-    printf("第十一步：视觉BA优化\n");
-    //-- 第十一步：视觉BA优化
-    for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter)
-    {
-      size_t cameraPoseNum = qlist_map_curr.size();
-      size_t cameraPointNum = points_3d_maps.size();
-      size_t cameraViewNum = views_map.size();
-      int cameraPose_correspondence = 0;
-      int cameraPoint_correspondence = 0;
-
-      ceres::LossFunction *loss_function1 = new ceres::HuberLoss(0.1);
-      ceres::LossFunction *loss_function2 = new ceres::CauchyLoss(0.01);
-      ceres::LocalParameterization *q_parameterization = new ceres::EigenQuaternionParameterization();
-      ceres::Problem::Options problem_options;
-      ceres::Problem problem(problem_options);
-
-      // printf("添加相机位姿和参数\n");
-
-      // //添加相机位姿和参数
-      // for (size_t i = 0; i < cameraPoseNum; ++i)
-      // {
-      //   double *p_ptr = tlist_map_curr[i].data();
-      //   printf("添加第%d个位姿 ( %p )\n", int(i), p_ptr);
-      //   //初始化,q.coeffs().data() = (x,y,z,w),t.data() = (x,y,z)
-      //   problem.AddParameterBlock(p_ptr, 3);
-      // }
-
-      // for (size_t i = 0; i < cameraPoseNum; ++i)
-      // {
-      //   double *q_ptr = qlist_map_curr[i].coeffs().data();
-      //   printf("添加第%d个位姿 ( %p )\n", int(i),  q_ptr);
-      //   //初始化,q.coeffs().data() = (x,y,z,w),t.data() = (x,y,z)
-      //   problem.AddParameterBlock(q_ptr, 4, q_parameterization);
-      // }
-
-      for (size_t i = 1; i < cameraPoseNum; ++i)
-      {
-        //添加约束, q_parameterization
-        ceres::CostFunction *cost_function = PoseGraph3dFactor::Create(qlist_last_curr[i], tlist_last_curr[i]);
-
-        problem.AddResidualBlock(cost_function, loss_function1, tlist_map_curr[i - 1].data(),
-                                 qlist_map_curr[i - 1].coeffs().data(), tlist_map_curr[i].data(),
-                                 qlist_map_curr[i].coeffs().data());
-
-        problem.SetParameterization(qlist_map_curr[i - 1].coeffs().data(), q_parameterization);
-        problem.SetParameterization(qlist_map_curr[i].coeffs().data(), q_parameterization);
-        cameraPose_correspondence++;
-      }
-
-      problem.SetParameterBlockConstant(tlist_map_curr[0].data());
-      problem.SetParameterBlockConstant(qlist_map_curr[0].coeffs().data());
-
-      // printf("添加特征点位姿并初始化\n");
-      // //添加特征点位姿并初始化
-      // for (size_t i = 0; i < cameraPointNum; ++i)
-      // {
-      //   problem.AddParameterBlock(points_3d_maps[i].data(), 3);
-      // }
-
-      //添加特征点约束
-      std::vector<CameraView> new_views_map;
-      for (size_t i = 1; i < cameraViewNum; ++i)
-      {
-        double *p_ptr = tlist_map_curr[views_map[i].camera_idx / 2].data();
-        double *q_ptr = qlist_map_curr[views_map[i].camera_idx / 2].coeffs().data();
-        double *point_ptr = points_3d_maps[views_map[i].point_idx].data();
-
-        // printf("p_ptr = ( %f , %f , %f )", p_ptr[0], p_ptr[1], p_ptr[2]);
-        // printf("q_ptr = ( %f , %f , %f )", q_ptr[0], q_ptr[1], q_ptr[2]);
-        // printf("point_ptr = ( %f , %f , %f )", point_ptr[0], point_ptr[1], point_ptr[2]);
-
-        double p[3];
-        ceres::QuaternionRotatePoint(q_ptr, point_ptr, p);
-        p[0] += p_ptr[0];
-        p[1] += p_ptr[1];
-        p[2] += p_ptr[2];
-
-        if (p[2] > stereoDistanceThresh || p[2] < 0.54)
-          continue;
-        // printf("p = ( %f , %f , %f )", p[0], p[1], p[2]);
-
-        //求出与相机坐标系的夹角
-        double xp = p[0] / p[2];
-        double yp = p[1] / p[2];
-
-        xp = 718.856 * xp + 607.1928;
-        yp = 718.856 * yp + 185.2157;
-
-        if (xp >= image_size.x || yp >= image_size.y || xp <= 1 || yp <= 1)
-          continue;
-
-        // printf("predict = ( %f , %f )\n", xp, yp);
-        // printf("observed = ( %f , %f )\n", views_map[i].observation_x, views_map[i].observation_y);
-
-        ceres::CostFunction *cost_function =
-            ReprojectionError::Create(views_map[i].observation_x, views_map[i].observation_y, left_camera_matrix);
-        problem.AddResidualBlock(cost_function, loss_function2, tlist_map_curr[views_map[i].camera_idx / 2].data(),
-                                 qlist_map_curr[views_map[i].camera_idx / 2].coeffs().data(),
-                                 points_3d_maps[views_map[i].point_idx].data());
-
-        new_views_map.push_back(views_map[i]);
-        cameraPoint_correspondence++;
-      }
-      printf("cameraPose_correspondence %d, cameraPoint_correspondence %d \n", cameraPose_correspondence,
-             cameraPoint_correspondence);
-
-      static int max_num_iter = 4;
-      ceres::Solver::Options options;
-      options.linear_solver_type = ceres::DENSE_QR;
-      options.max_num_iterations = max_num_iter;
-      options.minimizer_progress_to_stdout = true;
-      ceres::Solver::Summary summary;
-      ceres::Solve(options, &problem, &summary);
-
-      views_map = new_views_map;
-
-      double solve_efficiency = (1. - summary.final_cost / summary.initial_cost) / max_num_iter;
-      if (solve_efficiency > 0.05)
-        max_num_iter = max_num_iter + 1;
-      if (solve_efficiency < 0.01)
-        max_num_iter = max_num_iter - 1;
-      if (max_num_iter < 2)
-        max_num_iter = 2;
-      printf("solve_efficiency = %f %%, max_num_iter = %d.\n", solve_efficiency * 100, max_num_iter);
-    }
-  }
-
-  //-- 第六点二步：将特征点添加到点云中
-  pcl::PointCloud<PointType>::Ptr points_3d_clouds(new pcl::PointCloud<PointType>);
-  addPoints3DToCloud(points_3d_maps, points_3d_clouds);
-
-  //-- 第十一步：更新最新的坐标和地图
-
-  cornerPointsLast = cornerPointsLessSharp;
-  surfPointsLast = surfPointsLessFlat;
-
-  kdtreeCornerLast->setInputCloud(cornerPointsLast);
-  kdtreeSurfLast->setInputCloud(surfPointsLast);
-
-  cv_bridge::CvImage img_plot = cv_ptr_1;
-
-  // cv::drawMatches(cv_ptr_1.image, keypoints_1, cv_ptr_2.image, keypoints_2,
-  // matches_stereo, img_plot.image);
-
-  int good_point_count = 0;
-  for (int i = 0; i < matches_stereo.size(); i++)
-  {
-    // 第二个图
-    cv::Mat pt_trans1 =
-        left_camera_to_base_pose * (cv::Mat_<double>(4, 1) << points_3d[i].x, points_3d[i].y, points_3d[i].z, 1);
-    cv::Mat pt_trans2 =
-        right_camera_to_base_pose * (cv::Mat_<double>(4, 1) << points_3d[i].x, points_3d[i].y, points_3d[i].z, 1);
-    float depth1 = pt_trans1.at<double>(2, 0);
-    float depth2 = pt_trans2.at<double>(2, 0);
-    // if (depth1>0 && depth2>0)
-    // {
-    //   good_point_count++;
-    cv::circle(img_plot.image, keypoints_1[matches_stereo[i].queryIdx].pt, 2, get_color(depth1), 2);
-    // }
-  }
-  std::cout << "good_point_count = " << good_point_count << std::endl;
-
-  pubLeftImageWithFeature.publish(img_plot.toImageMsg());
-
-  sensor_msgs::PointCloud2 laserCloudOutput;
-  pcl::toROSMsg(laserCloudOut, laserCloudOutput);
-  laserCloudOutput.header.stamp = point_cloud_msg->header.stamp;
-  laserCloudOutput.header.frame_id = point_cloud_msg->header.frame_id;
-  pubPointCloudWithFeature.publish(laserCloudOutput);
-
-  pcl::toROSMsg(*cornerPointsSharp, laserCloudOutput);
-  laserCloudOutput.header.stamp = point_cloud_msg->header.stamp;
-  laserCloudOutput.header.frame_id = point_cloud_msg->header.frame_id;
-  pubCornerPointsSharp.publish(laserCloudOutput);
-
-  pcl::toROSMsg(*cornerPointsLessSharp, laserCloudOutput);
-  laserCloudOutput.header.stamp = point_cloud_msg->header.stamp;
-  laserCloudOutput.header.frame_id = point_cloud_msg->header.frame_id;
-  pubCornerPointsLessSharp.publish(laserCloudOutput);
-
-  pcl::toROSMsg(*surfPointsFlat, laserCloudOutput);
-  laserCloudOutput.header.stamp = point_cloud_msg->header.stamp;
-  laserCloudOutput.header.frame_id = point_cloud_msg->header.frame_id;
-  pubSurfPointsFlat.publish(laserCloudOutput);
-
-  pcl::toROSMsg(*surfPointsLessFlat, laserCloudOutput);
-  laserCloudOutput.header.stamp = point_cloud_msg->header.stamp;
-  laserCloudOutput.header.frame_id = point_cloud_msg->header.frame_id;
-  pubSurfPointsLessFlat.publish(laserCloudOutput);
-
-  pcl::toROSMsg(*points_3d_clouds, laserCloudOutput);
-  laserCloudOutput.header.stamp = point_cloud_msg->header.stamp;
-  laserCloudOutput.header.frame_id = "/velo_init";
-  pubCameraPointsCloud.publish(laserCloudOutput);
-
-  // publish odometry
-  nav_msgs::Odometry laserOdometry;
-  laserOdometry.header.frame_id = "/velo_init";
-  laserOdometry.child_frame_id = "/velo_link";
-  laserOdometry.header.stamp = point_cloud_msg->header.stamp;
-  laserOdometry.pose.pose.orientation.x = q_w_curr.x();
-  laserOdometry.pose.pose.orientation.y = q_w_curr.y();
-  laserOdometry.pose.pose.orientation.z = q_w_curr.z();
-  laserOdometry.pose.pose.orientation.w = q_w_curr.w();
-  laserOdometry.pose.pose.position.x = t_w_curr.x();
-  laserOdometry.pose.pose.position.y = t_w_curr.y();
-  laserOdometry.pose.pose.position.z = t_w_curr.z();
-  pubLaserOdometry.publish(laserOdometry);
-
-  static tf::TransformBroadcaster tf_bc;
-  tf::Transform tf_bc_t;
-  tf::Quaternion tf_bc_q;
-  tf_bc_t.setOrigin(tf::Vector3(t_w_curr(0), t_w_curr(1), t_w_curr(2)));
-  tf_bc_q.setW(q_w_curr.w());
-  tf_bc_q.setX(q_w_curr.x());
-  tf_bc_q.setY(q_w_curr.y());
-  tf_bc_q.setZ(q_w_curr.z());
-  tf_bc_t.setRotation(tf_bc_q);
-  tf_bc.sendTransform(tf::StampedTransform(tf_bc_t, point_cloud_msg->header.stamp, "/velo_init", "/velo_link"));
+  msg_update_mutex.lock();
+  left_image_msg_buf = *left_image_msg;
+  left_cam_info_msg_buf = *left_cam_info_msg;
+  right_image_msg_buf = *right_image_msg;
+  right_cam_info_msg_buf = *right_cam_info_msg;
+  point_cloud_msg_buf = *point_cloud_msg;
+  is_msg_updated = true;
+  msg_update_mutex.unlock();
 
   ROS_INFO("callbackLeftImage Stop\n");
 }
 
 // 激光雷达的参数
-void parseLidarType()
+void parseLidarType(const std::string &lidarType)
 {
   printf("Lidar type is %s", lidarType.c_str());
   if (lidarType == "VLP-16")
@@ -1223,21 +888,44 @@ void parseLidarType()
   printf(".\n");
 }
 
+void preprocessThread() __attribute__((noreturn));
+void odometryThread() __attribute__((noreturn));
+void mappingThread() __attribute__((noreturn));
+
+void preprocessThread()
+{
+  while (1)
+  {
+  }
+}
+
 // 主函数
 int main(int argc, char **argv)
 {
   ros::init(argc, argv, "liso_node");
   ros::NodeHandle nh;
 
-  ROS_INFO("liso Start\n");
+  ROS_INFO("liso Start.\n");
 
-  // 解析参数
+  std::string left_image_sub;
+  std::string left_camera_info_sub;
+  std::string right_image_sub;
+  std::string right_camera_info_sub;
+  std::string point_cloud_sub;
   nh.param<std::string>("left_image_sub", left_image_sub, "/kitti/camera_color_left/image_rect");
   nh.param<std::string>("left_camera_info_sub", left_camera_info_sub, "/kitti/camera_color_left/camera_info");
   nh.param<std::string>("right_image_sub", right_image_sub, "/kitti/camera_color_right/image_rect");
   nh.param<std::string>("right_camera_info_sub", right_camera_info_sub, "/kitti/camera_color_right/camera_info");
   nh.param<std::string>("point_cloud_sub", point_cloud_sub, "/kitti/velo/pointcloud");
 
+  std::string left_image_with_feature_pub;
+  std::string point_cloud_with_feature_pub;
+  std::string conner_points_pub;
+  std::string conner_points_less_pub;
+  std::string surf_points_pub;
+  std::string surf_points_less_pub;
+  std::string laser_odometry_pub;
+  std::string camera_points_clouds_pub;
   nh.param<std::string>("left_image_with_feature_pub", left_image_with_feature_pub, "/left_image_with_feature_pub");
   nh.param<std::string>("point_cloud_with_feature_pub", point_cloud_with_feature_pub, "/point_cloud_with_feature_pub");
   nh.param<std::string>("conner_points_pub", conner_points_pub, "/conner_points_pub");
@@ -1248,8 +936,9 @@ int main(int argc, char **argv)
   nh.param<std::string>("camera_points_clouds_pub", camera_points_clouds_pub, "/camera_points_clouds_pub");
 
   // 雷达参数
+  std::string lidarType;
   nh.param<std::string>("lidar_type", lidarType, "HDL-64E");
-  parseLidarType();
+  parseLidarType(lidarType);
 
   //机器人的最大半径
   nh.param<double>("minimum_range", MINIMUM_RANGE, RES_RANGE);
@@ -1265,20 +954,6 @@ int main(int argc, char **argv)
       sync(subLeftImage, subLeftCameraInfo, subRightImage, subRightCameraInfo, subPointCloud, 10);
   sync.registerCallback(boost::bind(&callbackHandle, _1, _2, _3, _4, _5));
 
-  // 传感器参数
-  left_camera_matrix << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0;
-  right_camera_matrix << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0;
-
-  stereoDistanceThresh = 718.856 * 0.54 * 2;
-
-  left_camera_to_base_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
-  right_camera_to_base_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0);
-  lidar_to_base_pose = (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
-
-  detector = cv::ORB::create();
-  descriptor = cv::ORB::create();
-  matcher = cv::DescriptorMatcher::create("BruteForce-Hamming");
-
   // 发布话题
   pubLeftImageWithFeature = nh.advertise<sensor_msgs::Image>(left_image_with_feature_pub, 10);
   pubPointCloudWithFeature = nh.advertise<sensor_msgs::PointCloud2>(point_cloud_with_feature_pub, 10);
@@ -1289,7 +964,25 @@ int main(int argc, char **argv)
   pubLaserOdometry = nh.advertise<nav_msgs::Odometry>(laser_odometry_pub, 10);
   pubCameraPointsCloud = nh.advertise<sensor_msgs::PointCloud2>(camera_points_clouds_pub, 10);
 
-  ros::spin();
+  // 传感器参数
+  // 相机内参
+  left_camera_matrix << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0;
+  right_camera_matrix << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0, 0.0, 1.0;
+  //传感器外参
+  left_camera_to_base_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
+  right_camera_to_base_pose = (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0);
+  lidar_to_base_pose = (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
 
+  stereoDistanceThresh = 718.856 * 0.54 * 2;
+
+  detector = cv::ORB::create();
+  descriptor = cv::ORB::create();
+  matcher = cv::DescriptorMatcher::create("BruteForce-Hamming");
+
+  std::thread preprocess_thread{ preprocessThread };
+  // std::thread odometry_thread{ odometryThread };
+  // std::thread mapping_thread{ mappingThread };
+
+  ros::spin();
   ROS_INFO("liso Stop\n");
 }
