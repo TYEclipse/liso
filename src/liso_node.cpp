@@ -75,7 +75,6 @@ static cv::Mat lidar_to_base_pose;
 static cv::Point2i image_size;
 
 //激光提取边沿点和平面点
-static Accumulator<float> curvature_range(0.1);
 static float cloudCurvature[400000];
 static int cloudSortInd[400000];
 static int cloudNeighborPicked[400000];
@@ -97,8 +96,17 @@ static sensor_msgs::CameraInfo left_cam_info_msg_buf;
 static sensor_msgs::Image right_image_msg_buf;
 static sensor_msgs::CameraInfo right_cam_info_msg_buf;
 static sensor_msgs::PointCloud2 point_cloud_msg_buf;
-static std::mutex msg_update_mutex;
-static bool is_msg_updated;
+static std::mutex preprocess_thread_mutex;
+static bool is_preprocess_thread_ready;
+
+static cv::Mat descriptors_left_buf, descriptors_right_buf;
+static std::vector<cv::Point2f> imgPoints_left, imgPoints_right_buf;
+static std::vector<cv::DMatch> good_matches_stereo_buf;
+static std::vector<cv::Point3d> good_points_3d_buf;
+static pcl::PointCloud<PointType> cornerPointsSharp_buf;
+static pcl::PointCloud<PointType> cornerPointsLessSharp_buf;
+static pcl::PointCloud<PointType> surfPointsFlat_buf;
+static pcl::PointCloud<PointType> surfPointsLessFlat_buf;
 
 inline cv::Scalar get_color(float depth)
 {
@@ -136,22 +144,41 @@ cv::Point2f pixel2cam(const cv::Point2d &p, const Eigen::Matrix3d &K)
 
 //根据匹配获得匹配点
 void filterMatchPoints(const std::vector<cv::KeyPoint> &keypoints_1, const std::vector<cv::KeyPoint> &keypoints_2,
-                       const cv::Mat &keypoints_desc1, const std::vector<cv::DMatch> &matches,
-                       std::vector<cv::Point2f> &points_1, std::vector<cv::Point2f> &points_2,
-                       std::vector<cv::Point2f> &img_points_1, std::vector<cv::Point2f> &img_points_2,
-                       cv::Mat &descriptors_curr)
+                       const std::vector<cv::DMatch> &matches, std::vector<cv::Point2f> &points_1,
+                       std::vector<cv::Point2f> &points_2)
 {
   points_1.clear();
   points_2.clear();
   for (int i = 0; i < (int)matches.size(); i++)
   {
     int query_idx = matches[i].queryIdx;
-    int train_idx = matches[i].queryIdx;
+    int train_idx = matches[i].trainIdx;
     points_1.push_back(pixel2cam(keypoints_1[query_idx].pt, left_camera_matrix));
     points_2.push_back(pixel2cam(keypoints_2[train_idx].pt, right_camera_matrix));
-    img_points_1.push_back(keypoints_1[query_idx].pt);
-    img_points_2.push_back(keypoints_2[train_idx].pt);
-    descriptors_curr.push_back(keypoints_desc1.row(query_idx));
+  }
+}
+
+void filterUsableKeyPoints(const std::vector<cv::KeyPoint> &keypoints_1, const std::vector<cv::KeyPoint> &keypoints_2,
+                           const cv::Mat &descriptors_1, const cv::Mat &descriptors_2,
+                           const std::vector<cv::DMatch> &matches, const std::vector<cv::Point3d> &points_3d,
+                           std::vector<cv::Point2f> &imgPoints_left, std::vector<cv::Point2f> &imgPoints_right,
+                           cv::Mat &descriptors_left, cv::Mat &descriptors_right, std::vector<cv::DMatch> &good_matches,
+                           std::vector<cv::Point3d> &good_points_3d)
+{
+  for (size_t i = 0; i < matches.size(); i++)
+  {
+    double depth = points_3d[i].z;
+    if (depth > stereoDistanceThresh || depth < 0.54)
+    {
+      int query_idx = matches[i].queryIdx;
+      int train_idx = matches[i].trainIdx;
+      descriptors_left.push_back(descriptors_1.row(query_idx));
+      descriptors_right.push_back(descriptors_2.row(query_idx));
+      imgPoints_left.push_back(keypoints_1[query_idx].pt);
+      imgPoints_right.push_back(keypoints_2[train_idx].pt);
+      good_matches.push_back(matches[i]);
+      good_points_3d.push_back(points_3d[i]);
+    }
   }
 }
 
@@ -174,7 +201,6 @@ void robustMatch(const cv::Mat &queryDescriptors, const cv::Mat &trainDescriptor
       }
     }
   }
-  std::cout << "matches.size() = " << matches.size() << std::endl;
 }
 
 //去除指定半径内的点
@@ -235,12 +261,7 @@ void calculatePointCurvature(pcl::PointCloud<PointType> &laserCloudIn)
     cloudLabel[i] = 0;
 
     laserCloudIn.points[i].curvature = curve;
-    if (curve < 4 * curvature_range.mean() && curve > -2 * curvature_range.mean())
-      curvature_range.addDataValue(cloudCurvature[i]);
   }
-
-  std::cout << "curvature_range = " << curvature_range.mean() << std::endl;
-  std::cout << "curvature_range std = " << curvature_range.stddev() << std::endl;
 }
 
 // 生成整理好的点云和序号
@@ -327,7 +348,7 @@ void parsePointCloudScans(const pcl::PointCloud<PointT> &laserCloudIn,
     point.curvature = 0.f;  //矢量长度
     laserCloudScans[scanID].push_back(point);
   }
-  printf("points size %d \n", count);
+  // printf("points size %d \n", count);
 }
 
 // 读取激光点云起始角和结束角
@@ -443,29 +464,27 @@ void segmentSurfAndConner(const std::vector<int> &scanStartInd, const std::vecto
   downSizeFilter.setInputCloud(surfPointsLessFlat);
   downSizeFilter.filter(*surfPointsLessFlat);
 
+  // 调整阈值，使得比值(numLessSharp:numSharp:numFlat:numLessFlat) = (1:5:10：2)
   float numSharp = cornerPointsSharp->size();
   float numLessSharp = cornerPointsLessSharp->size();
   float numFlat = surfPointsFlat->size();
   float numLessFlat = surfPointsLessFlat->size();
-  std::cout << "( " << numSharp << " , " << numLessSharp << " , " << numFlat << " , " << numLessFlat << " )"
-            << std::endl;
+  // std::cout << "( " << numSharp << " , " << numLessSharp << " , " << numFlat << " , " << numLessFlat << " )"
+  //           << std::endl;
 
   if (numLessSharp / numSharp > 5.5)
     sharp_thresh *= 0.9;
   else if (numLessSharp / numSharp < 4.5)
     sharp_thresh *= 1.1;
-
   if (numLessFlat / numLessSharp > 2.2)
     mid_thresh *= 0.9;
   else if (numLessFlat / numLessSharp < 1.8)
     mid_thresh *= 1.1;
-
   if (numLessFlat / numFlat > 5.5)
     flat_thresh *= 1.1;
   else if (numLessFlat / numFlat < 4.5)
     flat_thresh *= 0.9;
-
-  std::cout << "( " << sharp_thresh << " , " << mid_thresh << " , " << flat_thresh << " )" << std::endl;
+  // std::cout << "( " << sharp_thresh << " , " << mid_thresh << " , " << flat_thresh << " )" << std::endl;
 }
 
 // 把点转环到上一帧的坐标系上
@@ -832,18 +851,18 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
                     const sensor_msgs::CameraInfoConstPtr &right_cam_info_msg,
                     const sensor_msgs::PointCloud2ConstPtr &point_cloud_msg)
 {
-  ROS_INFO("callbackLeftImage Start\n");
+  ROS_INFO("callbackHandle Start\n");
 
-  msg_update_mutex.lock();
+  preprocess_thread_mutex.lock();
   left_image_msg_buf = *left_image_msg;
   left_cam_info_msg_buf = *left_cam_info_msg;
   right_image_msg_buf = *right_image_msg;
   right_cam_info_msg_buf = *right_cam_info_msg;
   point_cloud_msg_buf = *point_cloud_msg;
-  is_msg_updated = true;
-  msg_update_mutex.unlock();
+  is_preprocess_thread_ready = true;
+  preprocess_thread_mutex.unlock();
 
-  ROS_INFO("callbackLeftImage Stop\n");
+  ROS_INFO("callbackHandle Stop\n");
 }
 
 // 激光雷达的参数
@@ -896,6 +915,104 @@ void preprocessThread()
 {
   while (1)
   {
+    //-- 第0步：线程休眠,时长为线程运行时常
+    static auto start_time = std::chrono::high_resolution_clock::now();
+    static auto end_time = std::chrono::high_resolution_clock::now();
+    static std::chrono::duration<double, std::milli> elapsed_duration = end_time - start_time;
+    std::this_thread::sleep_for(elapsed_duration);
+
+    //-- 第1步：判断是否有新消息
+    preprocess_thread_mutex.lock();
+    bool is_msg_updated_local = is_preprocess_thread_ready;
+    preprocess_thread_mutex.unlock();
+    if (!is_msg_updated_local)
+    {
+      continue;
+    }
+
+    ROS_INFO("preprocessThread Start\n");
+    start_time = std::chrono::high_resolution_clock::now();
+
+    //-- 第2步：从线程外读取新消息
+    preprocess_thread_mutex.lock();
+    sensor_msgs::Image left_image_msg = left_image_msg_buf;
+    sensor_msgs::CameraInfo left_cam_info_msg = left_cam_info_msg_buf;
+    sensor_msgs::Image right_image_msg = right_image_msg_buf;
+    sensor_msgs::CameraInfo right_cam_info_msg = right_cam_info_msg_buf;
+    sensor_msgs::PointCloud2 point_cloud_msg = point_cloud_msg_buf;
+    is_preprocess_thread_ready = false;
+    preprocess_thread_mutex.unlock();
+
+    //-- 第3步：读取视觉图像数据
+    cv_bridge::CvImage cv_ptr_1, cv_ptr_2;
+    cv_ptr_1 = *cv_bridge::toCvCopy(left_image_msg, left_image_msg.encoding);
+    cv_ptr_2 = *cv_bridge::toCvCopy(right_image_msg, right_image_msg.encoding);
+
+    //-- 第4步：读取激光点云数据
+    pcl::PointCloud<pcl::PointXYZ>::Ptr laserCloudIn(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::fromROSMsg(point_cloud_msg, *laserCloudIn);
+
+    //-- 第5步：检测 Oriented FAST 角点位置
+    std::vector<cv::KeyPoint> keypoints_1, keypoints_2;
+    detector->detect(cv_ptr_1.image, keypoints_1);
+    detector->detect(cv_ptr_2.image, keypoints_2);
+
+    //-- 第6步：根据角点位置计算 BRIEF 描述子
+    cv::Mat descriptors_1, descriptors_2;
+    descriptor->compute(cv_ptr_1.image, keypoints_1, descriptors_1);
+    descriptor->compute(cv_ptr_2.image, keypoints_2, descriptors_2);
+
+    //-- 第7步：对两幅图像中的BRIEF描述子进行匹配，使用 Hamming 距离
+    std::vector<cv::DMatch> matches_stereo;
+    robustMatch(descriptors_1, descriptors_2, matches_stereo);
+
+    //-- 第8步：筛选出匹配点
+    std::vector<cv::Point2f> points_1, points_2;
+    filterMatchPoints(keypoints_1, keypoints_2, matches_stereo, points_1, points_2);
+
+    //-- 第9步：三角化计算
+    cv::Mat points_4d;
+    cv::triangulatePoints(left_camera_to_base_pose, right_camera_to_base_pose, points_1, points_2, points_4d);
+
+    //-- 第10步：齐次三维点归一化
+    std::vector<cv::Point3d> points_3d;
+    normalizeHomogeneousPoints(points_4d, points_3d);
+
+    //-- 第10.1步：根据三维点的具体位置限制,筛选相机前方合理区间的特征点
+    cv::Mat descriptors_left, descriptors_right;
+    std::vector<cv::Point2f> imgPoints_left, imgPoints_right;
+    std::vector<cv::DMatch> good_matches_stereo;
+    std::vector<cv::Point3d> good_points_3d;
+    filterUsableKeyPoints(keypoints_1, keypoints_2, descriptors_1, descriptors_2, matches_stereo, points_3d,
+                          imgPoints_left, imgPoints_right, descriptors_left, descriptors_right, good_matches_stereo,
+                          good_points_3d);
+
+    //-- 第11步：消除无意义点和距离为零的点
+    std::vector<int> indices;
+    pcl::removeNaNFromPointCloud(*laserCloudIn, *laserCloudIn, indices);
+    removeClosedPointCloud(*laserCloudIn, *laserCloudIn, MINIMUM_RANGE);
+
+    //-- 第12步：计算点云每条线的曲率
+    float startOri, endOri;
+    std::vector<pcl::PointCloud<PointType>> laserCloudScans;
+    pcl::PointCloud<PointType> laserCloudOut;
+    std::vector<int> scanStartInd, scanEndInd;
+    readPointCloudOrient(*laserCloudIn, startOri, endOri);
+    parsePointCloudScans(*laserCloudIn, laserCloudScans, startOri, endOri);
+    generateFromPointCloudScans(laserCloudScans, laserCloudOut, scanStartInd, scanEndInd);
+    calculatePointCurvature(laserCloudOut);
+
+    //-- 第12步：点云分割点云
+    pcl::PointCloud<PointType>::Ptr cornerPointsSharp(new pcl::PointCloud<PointType>);
+    pcl::PointCloud<PointType>::Ptr cornerPointsLessSharp(new pcl::PointCloud<PointType>);
+    pcl::PointCloud<PointType>::Ptr surfPointsFlat(new pcl::PointCloud<PointType>);
+    pcl::PointCloud<PointType>::Ptr surfPointsLessFlat(new pcl::PointCloud<PointType>);
+    segmentSurfAndConner(scanStartInd, scanEndInd, laserCloudOut, cornerPointsSharp, cornerPointsLessSharp,
+                         surfPointsFlat, surfPointsLessFlat);
+
+    ROS_INFO("preprocessThread End\n");
+    end_time = std::chrono::high_resolution_clock::now();
+    elapsed_duration = end_time - start_time;
   }
 }
 

@@ -148,7 +148,7 @@ void filterMatchPoints(const std::vector<cv::KeyPoint> &keypoints_1, const std::
   for (int i = 0; i < (int)matches.size(); i++)
   {
     int query_idx = matches[i].queryIdx;
-    int train_idx = matches[i].queryIdx;
+    int train_idx = matches[i].trainIdx;
     points_1.push_back(pixel2cam(keypoints_1[query_idx].pt, left_camera_matrix));
     points_2.push_back(pixel2cam(keypoints_2[train_idx].pt, right_camera_matrix));
     img_points_1.push_back(keypoints_1[query_idx].pt);
