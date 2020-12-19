@@ -33,6 +33,7 @@
 #include "Eigen/src/Geometry/Quaternion.h"
 #include "liso/CeresSolveFactor.hpp"
 #include "liso/common.h"
+#include "ros/init.h"
 
 //全局变量
 
@@ -82,15 +83,6 @@ static int cloudLabel[400000];
 
 //激光里程计
 
-// 前后帧参数
-// q_curr_last(x, y, z, w), t_curr_last(x,y,z)
-double para_q[4] = {0, 0, 0, 1};
-double para_t[3] = {0, 0, 0};
-Eigen::Map<Eigen::Quaterniond> q_last_curr(para_q);
-Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);
-Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
-Eigen::Vector3d t_w_curr(0, 0, 0);
-
 //消息预处理线程的缓存变量
 static sensor_msgs::Image left_image_msg_buf;
 static sensor_msgs::CameraInfo left_cam_info_msg_buf;
@@ -119,6 +111,7 @@ inline cv::Scalar get_color(float depth) {
   float up_th = 2 * depth_range.mean(), low_th = 0.f, th_range = up_th - low_th;
   if (depth > up_th) depth = up_th;
   if (depth < low_th) depth = low_th;
+  // printf("depth_range.mean() = %f\n", depth_range.mean());
   return cv::Scalar(255 * depth / th_range, 0, 255 * (1 - depth / th_range));
 }
 
@@ -170,7 +163,7 @@ void filterUsableKeyPoints(
     std::vector<cv::Point3d> &good_points_3d) {
   for (size_t i = 0; i < matches.size(); i++) {
     double depth = points_3d[i].z;
-    if (depth > stereoDistanceThresh || depth < 0.54) {
+    if (depth < stereoDistanceThresh && depth > 0.54) {
       int query_idx = matches[i].queryIdx;
       int train_idx = matches[i].trainIdx;
       descriptors_left.push_back(descriptors_1.row(query_idx));
@@ -462,7 +455,9 @@ void segmentSurfAndConner(
 }
 
 // 把点转环到上一帧的坐标系上
-void TransformToStart(PointType const *const pi, PointType *const po) {
+void TransformToStart(PointType const *const pi, PointType *const po,
+                      const Eigen::Quaterniond &q_last_curr,
+                      const Eigen::Vector3d &t_last_curr) {
   // interpolation ratio
   double s;
   if (DISTORTION)
@@ -487,254 +482,9 @@ void TransformToStart(PointType const *const pi, PointType *const po) {
   po->curvature = pi->curvature;
 }
 
-//激光里程计优化
-void lidarOdometryOptimism(
-    const pcl::PointCloud<PointType>::Ptr &cornerPointsSharp,
-    const pcl::PointCloud<PointType>::Ptr &surfPointsFlat,
-    const pcl::PointCloud<PointType>::Ptr &cornerPointsLast,
-    const pcl::PointCloud<PointType>::Ptr &surfPointsLast,
-    const pcl::KdTreeFLANN<PointType>::Ptr &kdtreeCornerLast,
-    const pcl::KdTreeFLANN<PointType>::Ptr &kdtreeSurfLast, double *para_q,
-    double *para_t)
-
-{
-  int cornerPointsSharpNum = cornerPointsSharp->points.size();
-  int surfPointsFlatNum = surfPointsFlat->points.size();
-  int corner_correspondence = 0;
-  int plane_correspondence = 0;
-
-  ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
-  ceres::LocalParameterization *q_parameterization =
-      new ceres::EigenQuaternionParameterization();
-  ceres::Problem::Options problem_options;
-  ceres::Problem problem(problem_options);
-  problem.AddParameterBlock(para_q, 4, q_parameterization);
-  problem.AddParameterBlock(para_t, 3);
-
-  PointType pointSel;
-  std::vector<int> pointSearchInd;
-  std::vector<float> pointSearchSqDis;
-
-  // 建立边缘特征约束
-  for (int i = 0; i < cornerPointsSharpNum; ++i) {
-    TransformToStart(&(cornerPointsSharp->points[i]), &pointSel);
-    kdtreeCornerLast->nearestKSearch(pointSel, 1, pointSearchInd,
-                                     pointSearchSqDis);
-
-    int closestPointInd = -1, minPointInd2 = -1;
-    if (pointSearchSqDis[0] < DISTANCE_SQ_THRESHOLD) {
-      closestPointInd = pointSearchInd[0];
-      int closestPointScanID =
-          int(cornerPointsLast->points[closestPointInd].intensity);
-
-      double minPointSqDis2 = DISTANCE_SQ_THRESHOLD;
-      // search in the direction of increasing scan line
-      for (int j = closestPointInd + 1;
-           j < (int)cornerPointsLast->points.size(); ++j) {
-        // if in the same scan line, continue
-        if (int(cornerPointsLast->points[j].intensity) <= closestPointScanID)
-          continue;
-
-        // if not in nearby scans, end the loop
-        if (int(cornerPointsLast->points[j].intensity) >
-            (closestPointScanID + NEARBY_SCAN))
-          break;
-
-        double pointSqDis = (cornerPointsLast->points[j].x - pointSel.x) *
-                                (cornerPointsLast->points[j].x - pointSel.x) +
-                            (cornerPointsLast->points[j].y - pointSel.y) *
-                                (cornerPointsLast->points[j].y - pointSel.y) +
-                            (cornerPointsLast->points[j].z - pointSel.z) *
-                                (cornerPointsLast->points[j].z - pointSel.z);
-
-        if (pointSqDis < minPointSqDis2) {
-          // find nearer point
-          minPointSqDis2 = pointSqDis;
-          minPointInd2 = j;
-        }
-      }
-
-      // search in the direction of decreasing scan line
-      for (int j = closestPointInd - 1; j >= 0; --j) {
-        // if in the same scan line, continue
-        if (int(cornerPointsLast->points[j].intensity) >= closestPointScanID)
-          continue;
-
-        // if not in nearby scans, end the loop
-        if (int(cornerPointsLast->points[j].intensity) <
-            (closestPointScanID - NEARBY_SCAN))
-          break;
-
-        double pointSqDis = (cornerPointsLast->points[j].x - pointSel.x) *
-                                (cornerPointsLast->points[j].x - pointSel.x) +
-                            (cornerPointsLast->points[j].y - pointSel.y) *
-                                (cornerPointsLast->points[j].y - pointSel.y) +
-                            (cornerPointsLast->points[j].z - pointSel.z) *
-                                (cornerPointsLast->points[j].z - pointSel.z);
-
-        if (pointSqDis < minPointSqDis2) {
-          // find nearer point
-          minPointSqDis2 = pointSqDis;
-          minPointInd2 = j;
-        }
-      }
-    }
-    if (minPointInd2 >= 0)  // both closestPointInd and minPointInd2 is valid
-    {
-      Eigen::Vector3d curr_point(cornerPointsSharp->points[i].x,
-                                 cornerPointsSharp->points[i].y,
-                                 cornerPointsSharp->points[i].z);
-      Eigen::Vector3d last_point_a(cornerPointsLast->points[closestPointInd].x,
-                                   cornerPointsLast->points[closestPointInd].y,
-                                   cornerPointsLast->points[closestPointInd].z);
-      Eigen::Vector3d last_point_b(cornerPointsLast->points[minPointInd2].x,
-                                   cornerPointsLast->points[minPointInd2].y,
-                                   cornerPointsLast->points[minPointInd2].z);
-
-      double s;
-      if (DISTORTION)
-        s = (cornerPointsSharp->points[i].intensity -
-             int(cornerPointsSharp->points[i].intensity)) /
-            SCAN_PERIOD;
-      else
-        s = 1.0;
-      ceres::CostFunction *cost_function =
-          LidarEdgeFactor::Create(curr_point, last_point_a, last_point_b, s);
-      problem.AddResidualBlock(cost_function, loss_function, para_q, para_t);
-      corner_correspondence++;
-    }
-  }
-
-  // find correspondence for plane features
-  for (int i = 0; i < surfPointsFlatNum; ++i) {
-    TransformToStart(&(surfPointsFlat->points[i]), &pointSel);
-    kdtreeSurfLast->nearestKSearch(pointSel, 1, pointSearchInd,
-                                   pointSearchSqDis);
-
-    int closestPointInd = -1, minPointInd2 = -1, minPointInd3 = -1;
-    if (pointSearchSqDis[0] < DISTANCE_SQ_THRESHOLD) {
-      closestPointInd = pointSearchInd[0];
-
-      // get closest point's scan ID
-      int closestPointScanID =
-          int(surfPointsLast->points[closestPointInd].intensity);
-      double minPointSqDis2 = DISTANCE_SQ_THRESHOLD,
-             minPointSqDis3 = DISTANCE_SQ_THRESHOLD;
-
-      // search in the direction of increasing scan line
-      for (int j = closestPointInd + 1; j < (int)surfPointsLast->points.size();
-           ++j) {
-        // if not in nearby scans, end the loop
-        if (int(surfPointsLast->points[j].intensity) >
-            (closestPointScanID + NEARBY_SCAN))
-          break;
-
-        double pointSqDis = (surfPointsLast->points[j].x - pointSel.x) *
-                                (surfPointsLast->points[j].x - pointSel.x) +
-                            (surfPointsLast->points[j].y - pointSel.y) *
-                                (surfPointsLast->points[j].y - pointSel.y) +
-                            (surfPointsLast->points[j].z - pointSel.z) *
-                                (surfPointsLast->points[j].z - pointSel.z);
-
-        // if in the same or lower scan line
-        if (int(surfPointsLast->points[j].intensity) <= closestPointScanID &&
-            pointSqDis < minPointSqDis2) {
-          minPointSqDis2 = pointSqDis;
-          minPointInd2 = j;
-        }
-        // if in the higher scan line
-        else if (int(surfPointsLast->points[j].intensity) >
-                     closestPointScanID &&
-                 pointSqDis < minPointSqDis3) {
-          minPointSqDis3 = pointSqDis;
-          minPointInd3 = j;
-        }
-      }
-
-      // search in the direction of decreasing scan line
-      for (int j = closestPointInd - 1; j >= 0; --j) {
-        // if not in nearby scans, end the loop
-        if (int(surfPointsLast->points[j].intensity) <
-            (closestPointScanID - NEARBY_SCAN))
-          break;
-
-        double pointSqDis = (surfPointsLast->points[j].x - pointSel.x) *
-                                (surfPointsLast->points[j].x - pointSel.x) +
-                            (surfPointsLast->points[j].y - pointSel.y) *
-                                (surfPointsLast->points[j].y - pointSel.y) +
-                            (surfPointsLast->points[j].z - pointSel.z) *
-                                (surfPointsLast->points[j].z - pointSel.z);
-
-        // if in the same or higher scan line
-        if (int(surfPointsLast->points[j].intensity) >= closestPointScanID &&
-            pointSqDis < minPointSqDis2) {
-          minPointSqDis2 = pointSqDis;
-          minPointInd2 = j;
-        } else if (int(surfPointsLast->points[j].intensity) <
-                       closestPointScanID &&
-                   pointSqDis < minPointSqDis3) {
-          // find nearer point
-          minPointSqDis3 = pointSqDis;
-          minPointInd3 = j;
-        }
-      }
-
-      if (minPointInd2 >= 0 && minPointInd3 >= 0) {
-        Eigen::Vector3d curr_point(surfPointsFlat->points[i].x,
-                                   surfPointsFlat->points[i].y,
-                                   surfPointsFlat->points[i].z);
-        Eigen::Vector3d last_point_a(surfPointsLast->points[closestPointInd].x,
-                                     surfPointsLast->points[closestPointInd].y,
-                                     surfPointsLast->points[closestPointInd].z);
-        Eigen::Vector3d last_point_b(surfPointsLast->points[minPointInd2].x,
-                                     surfPointsLast->points[minPointInd2].y,
-                                     surfPointsLast->points[minPointInd2].z);
-        Eigen::Vector3d last_point_c(surfPointsLast->points[minPointInd3].x,
-                                     surfPointsLast->points[minPointInd3].y,
-                                     surfPointsLast->points[minPointInd3].z);
-
-        double s;
-        if (DISTORTION)
-          s = (surfPointsFlat->points[i].intensity -
-               int(surfPointsFlat->points[i].intensity)) /
-              SCAN_PERIOD;
-        else
-          s = 1.0;
-        ceres::CostFunction *cost_function = LidarPlaneFactor::Create(
-            curr_point, last_point_a, last_point_b, last_point_c, s);
-        problem.AddResidualBlock(cost_function, loss_function, para_q, para_t);
-        plane_correspondence++;
-      }
-    }
-  }
-
-  printf("coner_correspondance %d, plane_correspondence %d \n",
-         corner_correspondence, plane_correspondence);
-
-  if ((corner_correspondence + plane_correspondence) < 10) {
-    printf(
-        "less correspondence! "
-        "*************************************************\n");
-  }
-  static int max_num_iter = 4;
-  ceres::Solver::Options options;
-  options.linear_solver_type = ceres::DENSE_QR;
-  options.max_num_iterations = max_num_iter;
-  options.minimizer_progress_to_stdout = true;
-  ceres::Solver::Summary summary;
-  ceres::Solve(options, &problem, &summary);
-
-  double solve_efficiency =
-      (1. - summary.final_cost / summary.initial_cost) / max_num_iter;
-  if (solve_efficiency > 0.05) max_num_iter = max_num_iter + 1;
-  if (solve_efficiency < 0.01) max_num_iter = max_num_iter - 1;
-  if (max_num_iter < 2) max_num_iter = 2;
-  printf("solve_efficiency = %f %%, max_num_iter = %d.\n",
-         solve_efficiency * 100, max_num_iter);
-}
-
 void CvPointTransform(const cv::Point3d &pi, cv::Point3d &po,
-                      Eigen::Quaterniond &q_point, Eigen::Vector3d &t_point) {
+                      const Eigen::Quaterniond &q_point,
+                      const Eigen::Vector3d &t_point) {
   Eigen::Vector3d point(pi.x, pi.y, pi.z);
   Eigen::Vector3d un_point = q_point * point + t_point;
 
@@ -748,6 +498,8 @@ void addMatchPointToViews(const std::vector<cv::Point2f> &points_1,
                           const std::vector<cv::Point2f> &points_2,
                           const cv::Mat &descriptors_1,
                           const std::vector<cv::Point3d> &points_3d,
+                          const Eigen::Quaterniond &q_w_curr,
+                          const Eigen::Vector3d &t_w_curr,
                           cv::Mat &descriptorsInMap, int camera_idx,
                           std::vector<CameraView> &camera_views,
                           std::vector<Eigen::Vector3d> &points_3d_maps) {
@@ -835,13 +587,13 @@ void addMatchPointToViews(const std::vector<cv::Point2f> &points_1,
 }
 
 void addPoints3DToCloud(
-    const std::vector<Eigen::Vector3d> &points_3d_maps,
+    const std::vector<cv::Point3d> &points_3d,
     const pcl::PointCloud<PointType>::Ptr &points_3d_clouds) {
-  for (auto point : points_3d_maps) {
+  for (auto point : points_3d) {
     PointType pointSel;
-    pointSel.x = point.x();
-    pointSel.y = point.y();
-    pointSel.z = point.z();
+    pointSel.x = point.x;
+    pointSel.y = point.y;
+    pointSel.z = point.z;
     points_3d_clouds->push_back(pointSel);
   }
 }
@@ -862,6 +614,13 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   point_cloud_msg_buf = *point_cloud_msg;
   is_preprocess_thread_ready = true;
   preprocess_thread_mutex.unlock();
+
+  static tf::TransformBroadcaster broadcaster;
+  tf::Transform tf_left_camera_to_base_pose(tf::Quaternion(0.5, -0.5, 0.5, 0.5),
+                                            tf::Vector3(0, -0.08, -0.27));
+  broadcaster.sendTransform(
+      tf::StampedTransform(tf_left_camera_to_base_pose, ros::Time::now(),
+                           "/kitti_base_link", "/kitti_velo_link"));
 
   ROS_INFO("callbackHandle Stop\n");
 }
@@ -1026,6 +785,42 @@ void preprocessThread() {
     is_odometry_thread_ready = true;
     odometry_thread_mutex.unlock();
 
+    cv_bridge::CvImage img_plot = cv_ptr_1;
+    for (int i = 0; i < imgPoints_left.size(); i++)
+      cv::circle(img_plot.image, imgPoints_left[i], 2,
+                 get_color(good_points_3d[i].z), 2);
+    pubLeftImageWithFeature.publish(img_plot.toImageMsg());
+
+    pcl::PointCloud<PointType>::Ptr points_3d_clouds(
+        new pcl::PointCloud<PointType>);
+    addPoints3DToCloud(good_points_3d, points_3d_clouds);
+
+    sensor_msgs::PointCloud2 laserCloudOutput;
+    pcl::toROSMsg(*points_3d_clouds, laserCloudOutput);
+    laserCloudOutput.header.stamp = ros::Time::now();
+    laserCloudOutput.header.frame_id = "/kitti_base_link";
+    pubCameraPointsCloud.publish(laserCloudOutput);
+
+    pcl::toROSMsg(*cornerPointsSharp, laserCloudOutput);
+    laserCloudOutput.header.stamp = ros::Time::now();
+    laserCloudOutput.header.frame_id = "/kitti_velo_link";
+    pubCornerPointsSharp.publish(laserCloudOutput);
+
+    pcl::toROSMsg(*cornerPointsLessSharp, laserCloudOutput);
+    laserCloudOutput.header.stamp = ros::Time::now();
+    laserCloudOutput.header.frame_id = "/kitti_velo_link";
+    pubCornerPointsLessSharp.publish(laserCloudOutput);
+
+    pcl::toROSMsg(*surfPointsFlat, laserCloudOutput);
+    laserCloudOutput.header.stamp = ros::Time::now();
+    laserCloudOutput.header.frame_id = "/kitti_velo_link";
+    pubSurfPointsFlat.publish(laserCloudOutput);
+
+    pcl::toROSMsg(*surfPointsLessFlat, laserCloudOutput);
+    laserCloudOutput.header.stamp = ros::Time::now();
+    laserCloudOutput.header.frame_id = "/kitti_velo_link";
+    pubSurfPointsLessFlat.publish(laserCloudOutput);
+
     ROS_INFO("preprocessThread End\n");
     end_time = std::chrono::high_resolution_clock::now();
     elapsed_duration = end_time - start_time;
@@ -1054,19 +849,343 @@ void odometryThread() {
 
     //-- 第2步：从预处理线程读取数据
     odometry_thread_mutex.lock();
-    cv::Mat descriptors_left = descriptors_left_buf;
-    cv::Mat descriptors_right = descriptors_right_buf;
-    std::vector<cv::Point2f> imgPoints_left = imgPoints_left_buf;
-    std::vector<cv::Point2f> imgPoints_right = imgPoints_right_buf;
-    std::vector<cv::DMatch> good_matches_stereo = good_matches_stereo_buf;
-    std::vector<cv::Point3d> good_points_3d = good_points_3d_buf;
-    pcl::PointCloud<PointType> cornerPointsSharp = cornerPointsSharp_buf;
-    pcl::PointCloud<PointType> cornerPointsLessSharp =
+    cv::Mat descriptors_left_curr = descriptors_left_buf;
+    cv::Mat descriptors_right_curr = descriptors_right_buf;
+    std::vector<cv::Point2f> imgPoints_left_curr = imgPoints_left_buf;
+    std::vector<cv::Point2f> imgPoints_right_curr = imgPoints_right_buf;
+    std::vector<cv::DMatch> good_matches_stereo_curr = good_matches_stereo_buf;
+    std::vector<cv::Point3d> good_points_3d_curr = good_points_3d_buf;
+    pcl::PointCloud<PointType> cornerPointsSharp_curr = cornerPointsSharp_buf;
+    pcl::PointCloud<PointType> cornerPointsLessSharp_curr =
         cornerPointsLessSharp_buf;
-    pcl::PointCloud<PointType> surfPointsFlat = surfPointsFlat_buf;
-    pcl::PointCloud<PointType> surfPointsLessFlat = surfPointsLessFlat_buf;
+    pcl::PointCloud<PointType> surfPointsFlat_curr = surfPointsFlat_buf;
+    pcl::PointCloud<PointType> surfPointsLessFlat_curr = surfPointsLessFlat_buf;
     is_odometry_thread_ready = false;
     odometry_thread_mutex.unlock();
+
+    //-- 第3步：判断是否初始化
+    static cv::Mat descriptors_left_last, descriptors_right_last;
+    static std::vector<cv::Point2f> imgPoints_left_last, imgPoints_right_last;
+    static std::vector<cv::DMatch> good_matches_stereo_last;
+    static std::vector<cv::Point3d> good_points_3d_last;
+    static pcl::PointCloud<PointType> cornerPointsSharp_last;
+    static pcl::PointCloud<PointType> cornerPointsLessSharp_last;
+    static pcl::PointCloud<PointType> surfPointsFlat_last;
+    static pcl::PointCloud<PointType> surfPointsLessFlat_last;
+
+    static bool is_odometry_thread_init = false;
+
+    static std::vector<Eigen::Quaterniond> qlist_map_curr;
+    static std::vector<Eigen::Quaterniond> qlist_last_curr;
+    static std::vector<Eigen::Vector3d> tlist_map_curr;
+    static std::vector<Eigen::Vector3d> tlist_last_curr;
+
+    static Eigen::Quaterniond q_last_curr(1, 0, 0, 0);
+    static Eigen::Vector3d t_last_curr(0, 0, 0);
+    static Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
+    static Eigen::Vector3d t_w_curr(0, 0, 0);
+
+    if (!is_odometry_thread_init) {
+      is_odometry_thread_init = true;
+      qlist_map_curr.push_back(q_w_curr);
+      qlist_last_curr.push_back(q_last_curr);
+      tlist_map_curr.push_back(t_w_curr);
+      tlist_last_curr.push_back(t_last_curr);
+    } else {
+      pcl::PointCloud<PointType>::Ptr cornerPointsLessSharp_last_ptr(
+          new pcl::PointCloud<PointType>(cornerPointsLessSharp_last));
+      pcl::PointCloud<PointType>::Ptr surfPointsLessFlat_last_ptr(
+          new pcl::PointCloud<PointType>(surfPointsLessFlat_last));
+      pcl::KdTreeFLANN<PointType>::Ptr kdtreeCornerLast(
+          new pcl::KdTreeFLANN<PointType>());
+      pcl::KdTreeFLANN<PointType>::Ptr kdtreeSurfLast(
+          new pcl::KdTreeFLANN<PointType>());
+      kdtreeCornerLast->setInputCloud(cornerPointsLessSharp_last_ptr);
+      kdtreeSurfLast->setInputCloud(surfPointsLessFlat_last_ptr);
+
+      for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter) {
+        printf("test point 1.");
+
+        ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
+        ceres::LocalParameterization *q_parameterization =
+            new ceres::EigenQuaternionParameterization();
+        ceres::Problem::Options problem_options;
+        ceres::Problem problem(problem_options);
+
+        printf("test point 2.");
+
+        problem.AddParameterBlock(q_last_curr.coeffs().data(), 4,
+                                  q_parameterization);
+        problem.AddParameterBlock(t_last_curr.data(), 3);
+
+        PointType pointSel;
+        std::vector<int> pointSearchInd;
+        std::vector<float> pointSearchSqDis;
+
+        // 建立边缘特征约束
+        int cornerPointsSharpNum = cornerPointsSharp_curr.points.size();
+        int corner_correspondence = 0;
+        for (int i = 0; i < cornerPointsSharpNum; ++i) {
+          TransformToStart(&(cornerPointsSharp_curr.points[i]), &pointSel,
+                           q_last_curr, t_last_curr);
+          kdtreeCornerLast->nearestKSearch(pointSel, 1, pointSearchInd,
+                                           pointSearchSqDis);
+
+          int closestPointInd = -1, minPointInd2 = -1;
+          if (pointSearchSqDis[0] < DISTANCE_SQ_THRESHOLD) {
+            closestPointInd = pointSearchInd[0];
+            int closestPointScanID = int(
+                cornerPointsLessSharp_last.points[closestPointInd].intensity);
+
+            double minPointSqDis2 = DISTANCE_SQ_THRESHOLD;
+            // search in the direction of increasing scan line
+            for (int j = closestPointInd + 1;
+                 j < (int)cornerPointsLessSharp_last.points.size(); ++j) {
+              // if in the same scan line, continue
+              if (int(cornerPointsLessSharp_last.points[j].intensity) <=
+                  closestPointScanID)
+                continue;
+
+              // if not in nearby scans, end the loop
+              if (int(cornerPointsLessSharp_last.points[j].intensity) >
+                  (closestPointScanID + NEARBY_SCAN))
+                break;
+
+              double pointSqDis =
+                  (cornerPointsLessSharp_last.points[j].x - pointSel.x) *
+                      (cornerPointsLessSharp_last.points[j].x - pointSel.x) +
+                  (cornerPointsLessSharp_last.points[j].y - pointSel.y) *
+                      (cornerPointsLessSharp_last.points[j].y - pointSel.y) +
+                  (cornerPointsLessSharp_last.points[j].z - pointSel.z) *
+                      (cornerPointsLessSharp_last.points[j].z - pointSel.z);
+
+              if (pointSqDis < minPointSqDis2) {
+                // find nearer point
+                minPointSqDis2 = pointSqDis;
+                minPointInd2 = j;
+              }
+            }
+
+            // search in the direction of decreasing scan line
+            for (int j = closestPointInd - 1; j >= 0; --j) {
+              // if in the same scan line, continue
+              if (int(cornerPointsLessSharp_last.points[j].intensity) >=
+                  closestPointScanID)
+                continue;
+
+              // if not in nearby scans, end the loop
+              if (int(cornerPointsLessSharp_last.points[j].intensity) <
+                  (closestPointScanID - NEARBY_SCAN))
+                break;
+
+              double pointSqDis =
+                  (cornerPointsLessSharp_last.points[j].x - pointSel.x) *
+                      (cornerPointsLessSharp_last.points[j].x - pointSel.x) +
+                  (cornerPointsLessSharp_last.points[j].y - pointSel.y) *
+                      (cornerPointsLessSharp_last.points[j].y - pointSel.y) +
+                  (cornerPointsLessSharp_last.points[j].z - pointSel.z) *
+                      (cornerPointsLessSharp_last.points[j].z - pointSel.z);
+
+              if (pointSqDis < minPointSqDis2) {
+                // find nearer point
+                minPointSqDis2 = pointSqDis;
+                minPointInd2 = j;
+              }
+            }
+          }
+          if (minPointInd2 >=
+              0)  // both closestPointInd and minPointInd2 is valid
+          {
+            Eigen::Vector3d curr_point(cornerPointsSharp_curr.points[i].x,
+                                       cornerPointsSharp_curr.points[i].y,
+                                       cornerPointsSharp_curr.points[i].z);
+            Eigen::Vector3d last_point_a(
+                cornerPointsLessSharp_last.points[closestPointInd].x,
+                cornerPointsLessSharp_last.points[closestPointInd].y,
+                cornerPointsLessSharp_last.points[closestPointInd].z);
+            Eigen::Vector3d last_point_b(
+                cornerPointsLessSharp_last.points[minPointInd2].x,
+                cornerPointsLessSharp_last.points[minPointInd2].y,
+                cornerPointsLessSharp_last.points[minPointInd2].z);
+
+            double s;
+            if (DISTORTION)
+              s = (cornerPointsSharp_curr.points[i].intensity -
+                   int(cornerPointsSharp_curr.points[i].intensity)) /
+                  SCAN_PERIOD;
+            else
+              s = 1.0;
+            ceres::CostFunction *cost_function = LidarEdgeFactor::Create(
+                curr_point, last_point_a, last_point_b, s);
+            problem.AddResidualBlock(cost_function, loss_function,
+                                     q_last_curr.coeffs().data(),
+                                     t_last_curr.data());
+            corner_correspondence++;
+          }
+        }
+
+        printf("test point 4.");
+        // find correspondence for plane features
+        int surfPointsFlatNum = cornerPointsSharp_curr.points.size();
+        int plane_correspondence = 0;
+        for (int i = 0; i < surfPointsFlatNum; ++i) {
+          TransformToStart(&(cornerPointsSharp_curr.points[i]), &pointSel,
+                           q_last_curr, t_last_curr);
+          kdtreeSurfLast->nearestKSearch(pointSel, 1, pointSearchInd,
+                                         pointSearchSqDis);
+
+          int closestPointInd = -1, minPointInd2 = -1, minPointInd3 = -1;
+          if (pointSearchSqDis[0] < DISTANCE_SQ_THRESHOLD) {
+            closestPointInd = pointSearchInd[0];
+
+            // get closest point's scan ID
+            int closestPointScanID =
+                int(surfPointsLessFlat_last.points[closestPointInd].intensity);
+            double minPointSqDis2 = DISTANCE_SQ_THRESHOLD,
+                   minPointSqDis3 = DISTANCE_SQ_THRESHOLD;
+
+            // search in the direction of increasing scan line
+            for (int j = closestPointInd + 1;
+                 j < (int)surfPointsLessFlat_last.points.size(); ++j) {
+              // if not in nearby scans, end the loop
+              if (int(surfPointsLessFlat_last.points[j].intensity) >
+                  (closestPointScanID + NEARBY_SCAN))
+                break;
+
+              double pointSqDis =
+                  (surfPointsLessFlat_last.points[j].x - pointSel.x) *
+                      (surfPointsLessFlat_last.points[j].x - pointSel.x) +
+                  (surfPointsLessFlat_last.points[j].y - pointSel.y) *
+                      (surfPointsLessFlat_last.points[j].y - pointSel.y) +
+                  (surfPointsLessFlat_last.points[j].z - pointSel.z) *
+                      (surfPointsLessFlat_last.points[j].z - pointSel.z);
+
+              // if in the same or lower scan line
+              if (int(surfPointsLessFlat_last.points[j].intensity) <=
+                      closestPointScanID &&
+                  pointSqDis < minPointSqDis2) {
+                minPointSqDis2 = pointSqDis;
+                minPointInd2 = j;
+              }
+              // if in the higher scan line
+              else if (int(surfPointsLessFlat_last.points[j].intensity) >
+                           closestPointScanID &&
+                       pointSqDis < minPointSqDis3) {
+                minPointSqDis3 = pointSqDis;
+                minPointInd3 = j;
+              }
+            }
+
+            // search in the direction of decreasing scan line
+            for (int j = closestPointInd - 1; j >= 0; --j) {
+              // if not in nearby scans, end the loop
+              if (int(surfPointsLessFlat_last.points[j].intensity) <
+                  (closestPointScanID - NEARBY_SCAN))
+                break;
+
+              double pointSqDis =
+                  (surfPointsLessFlat_last.points[j].x - pointSel.x) *
+                      (surfPointsLessFlat_last.points[j].x - pointSel.x) +
+                  (surfPointsLessFlat_last.points[j].y - pointSel.y) *
+                      (surfPointsLessFlat_last.points[j].y - pointSel.y) +
+                  (surfPointsLessFlat_last.points[j].z - pointSel.z) *
+                      (surfPointsLessFlat_last.points[j].z - pointSel.z);
+
+              // if in the same or higher scan line
+              if (int(surfPointsLessFlat_last.points[j].intensity) >=
+                      closestPointScanID &&
+                  pointSqDis < minPointSqDis2) {
+                minPointSqDis2 = pointSqDis;
+                minPointInd2 = j;
+              } else if (int(surfPointsLessFlat_last.points[j].intensity) <
+                             closestPointScanID &&
+                         pointSqDis < minPointSqDis3) {
+                // find nearer point
+                minPointSqDis3 = pointSqDis;
+                minPointInd3 = j;
+              }
+            }
+
+            if (minPointInd2 >= 0 && minPointInd3 >= 0) {
+              Eigen::Vector3d curr_point(cornerPointsSharp_curr.points[i].x,
+                                         cornerPointsSharp_curr.points[i].y,
+                                         cornerPointsSharp_curr.points[i].z);
+              Eigen::Vector3d last_point_a(
+                  surfPointsLessFlat_last.points[closestPointInd].x,
+                  surfPointsLessFlat_last.points[closestPointInd].y,
+                  surfPointsLessFlat_last.points[closestPointInd].z);
+              Eigen::Vector3d last_point_b(
+                  surfPointsLessFlat_last.points[minPointInd2].x,
+                  surfPointsLessFlat_last.points[minPointInd2].y,
+                  surfPointsLessFlat_last.points[minPointInd2].z);
+              Eigen::Vector3d last_point_c(
+                  surfPointsLessFlat_last.points[minPointInd3].x,
+                  surfPointsLessFlat_last.points[minPointInd3].y,
+                  surfPointsLessFlat_last.points[minPointInd3].z);
+
+              double s;
+              if (DISTORTION)
+                s = (cornerPointsSharp_curr.points[i].intensity -
+                     int(surfPointsLessFlat_last.points[i].intensity)) /
+                    SCAN_PERIOD;
+              else
+                s = 1.0;
+              ceres::CostFunction *cost_function = LidarPlaneFactor::Create(
+                  curr_point, last_point_a, last_point_b, last_point_c, s);
+              problem.AddResidualBlock(cost_function, loss_function,
+                                       q_last_curr.coeffs().data(),
+                                       t_last_curr.data());
+              plane_correspondence++;
+            }
+          }
+        }
+
+        printf("coner_correspondance %d, plane_correspondence %d \n",
+               corner_correspondence, plane_correspondence);
+
+        if ((corner_correspondence + plane_correspondence) < 10) {
+          printf(
+              "less correspondence! "
+              "*************************************************\n");
+        }
+        static int max_num_iter = 4;
+        ceres::Solver::Options options;
+        options.linear_solver_type = ceres::DENSE_QR;
+        options.max_num_iterations = max_num_iter;
+        options.minimizer_progress_to_stdout = true;
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+
+        double solve_efficiency =
+            (1. - summary.final_cost / summary.initial_cost) / max_num_iter;
+        if (solve_efficiency > 0.05) max_num_iter = max_num_iter + 1;
+        if (solve_efficiency < 0.01) max_num_iter = max_num_iter - 1;
+        if (max_num_iter < 2) max_num_iter = 2;
+        printf("solve_efficiency = %f %%, max_num_iter = %d.\n",
+               solve_efficiency * 100, max_num_iter);
+      }
+    }
+    t_w_curr = t_w_curr + q_w_curr * t_last_curr;
+    q_w_curr = q_w_curr * q_last_curr;
+
+    //保存到位姿列表和唯一列表
+    //用于设置初始位姿
+    qlist_map_curr.push_back(q_w_curr);
+    tlist_map_curr.push_back(t_w_curr);
+    //用于添加约束
+    qlist_last_curr.push_back(q_last_curr);
+    tlist_last_curr.push_back(t_last_curr);
+
+    descriptors_left_last = descriptors_left_curr;
+    descriptors_right_last = descriptors_right_curr;
+    imgPoints_left_last = imgPoints_left_curr;
+    imgPoints_right_last = imgPoints_right_curr;
+    good_matches_stereo_last = good_matches_stereo_curr;
+    good_points_3d_last = good_points_3d_curr;
+    cornerPointsSharp_last = cornerPointsSharp_curr;
+    cornerPointsLessSharp_last = cornerPointsLessSharp_curr;
+    surfPointsFlat_last = surfPointsFlat_curr;
+    surfPointsLessFlat_last = surfPointsLessFlat_curr;
 
     ROS_INFO("odometryThread End\n");
     end_time = std::chrono::high_resolution_clock::now();
@@ -1177,6 +1296,7 @@ int main(int argc, char **argv) {
       (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
   right_camera_to_base_pose =
       (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0);
+
   lidar_to_base_pose =
       (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
 
@@ -1187,9 +1307,14 @@ int main(int argc, char **argv) {
   matcher = cv::DescriptorMatcher::create("BruteForce-Hamming");
 
   std::thread preprocess_thread{preprocessThread};
-  std::thread odometry_thread{odometryThread};
+  // std::thread odometry_thread{odometryThread};
   // std::thread mapping_thread{ mappingThread };
 
   ros::spin();
+
+  while (ros::ok()) {
+    ros::spinOnce();
+  }
+
   ROS_INFO("liso Stop\n");
 }
