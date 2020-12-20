@@ -83,7 +83,12 @@ static int cloudLabel[400000];
 
 //激光里程计
 
-//消息预处理线程的缓存变量
+//主线程的缓存变量
+static Eigen::Quaterniond q_w_curr_buf;
+static Eigen::Vector3d t_w_curr_buf;
+static std::mutex main_thread_mutex;
+
+//预处理线程的缓存变量
 static sensor_msgs::Image left_image_msg_buf;
 static sensor_msgs::CameraInfo left_cam_info_msg_buf;
 static sensor_msgs::Image right_image_msg_buf;
@@ -615,12 +620,27 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   is_preprocess_thread_ready = true;
   preprocess_thread_mutex.unlock();
 
-  static tf::TransformBroadcaster broadcaster;
+  main_thread_mutex.lock();
+  Eigen::Quaterniond q_w_curr_new = q_w_curr_buf;
+  Eigen::Vector3d t_w_curr_new = t_w_curr_buf;
+  main_thread_mutex.unlock();
+
   tf::Transform tf_left_camera_to_base_pose(tf::Quaternion(0.5, -0.5, 0.5, 0.5),
                                             tf::Vector3(0, -0.08, -0.27));
-  broadcaster.sendTransform(
-      tf::StampedTransform(tf_left_camera_to_base_pose, ros::Time::now(),
-                           "/kitti_base_link", "/kitti_velo_link"));
+  tf::Transform tf_base_to_world_pose(
+      tf::Quaternion(q_w_curr_new.x(), q_w_curr_new.y(), q_w_curr_new.z(),
+                     q_w_curr_new.w()),
+      tf::Vector3(t_w_curr_new.x(), t_w_curr_new.y(), t_w_curr_new.z()));
+  std::vector<tf::StampedTransform> tf_list;
+  tf_list.push_back(tf::StampedTransform(tf_left_camera_to_base_pose,
+                                         ros::Time::now(), "kitti_base_link",
+                                         "kitti_velo_link"));
+  tf_list.push_back(tf::StampedTransform(tf_base_to_world_pose,
+                                         ros::Time::now(), "kitti_world_link",
+                                         "kitti_base_link"));
+  // （变成注释tf树每个节点只能有一个父节点）
+  static tf::TransformBroadcaster broadcaster;
+  broadcaster.sendTransform(tf_list);
 
   ROS_INFO("callbackHandle Stop\n");
 }
@@ -798,27 +818,27 @@ void preprocessThread() {
     sensor_msgs::PointCloud2 laserCloudOutput;
     pcl::toROSMsg(*points_3d_clouds, laserCloudOutput);
     laserCloudOutput.header.stamp = ros::Time::now();
-    laserCloudOutput.header.frame_id = "/kitti_base_link";
+    laserCloudOutput.header.frame_id = "kitti_base_link";
     pubCameraPointsCloud.publish(laserCloudOutput);
 
     pcl::toROSMsg(*cornerPointsSharp, laserCloudOutput);
     laserCloudOutput.header.stamp = ros::Time::now();
-    laserCloudOutput.header.frame_id = "/kitti_velo_link";
+    laserCloudOutput.header.frame_id = "kitti_velo_link";
     pubCornerPointsSharp.publish(laserCloudOutput);
 
     pcl::toROSMsg(*cornerPointsLessSharp, laserCloudOutput);
     laserCloudOutput.header.stamp = ros::Time::now();
-    laserCloudOutput.header.frame_id = "/kitti_velo_link";
+    laserCloudOutput.header.frame_id = "kitti_velo_link";
     pubCornerPointsLessSharp.publish(laserCloudOutput);
 
     pcl::toROSMsg(*surfPointsFlat, laserCloudOutput);
     laserCloudOutput.header.stamp = ros::Time::now();
-    laserCloudOutput.header.frame_id = "/kitti_velo_link";
+    laserCloudOutput.header.frame_id = "kitti_velo_link";
     pubSurfPointsFlat.publish(laserCloudOutput);
 
     pcl::toROSMsg(*surfPointsLessFlat, laserCloudOutput);
     laserCloudOutput.header.stamp = ros::Time::now();
-    laserCloudOutput.header.frame_id = "/kitti_velo_link";
+    laserCloudOutput.header.frame_id = "kitti_velo_link";
     pubSurfPointsLessFlat.publish(laserCloudOutput);
 
     ROS_INFO("preprocessThread End\n");
@@ -885,6 +905,15 @@ void odometryThread() {
     static Eigen::Quaterniond q_w_curr(1, 0, 0, 0);
     static Eigen::Vector3d t_w_curr(0, 0, 0);
 
+    static Eigen::Quaterniond q_identity(1, 0, 0, 0);
+    static Eigen::Vector3d t_identity(0, 0, 0);
+
+    static Eigen::Quaterniond q_lidar_to_pose(0.5, 0.5, -0.5, 0.5);
+    static Eigen::Vector3d t_lidar_to_pose(0., -0.08, -0.27);
+    static Eigen::Quaterniond q_pose_to_lidar = q_lidar_to_pose.inverse();
+    static Eigen::Vector3d t_pose_to_lidar =
+        t_identity - q_pose_to_lidar * t_lidar_to_pose;
+
     if (!is_odometry_thread_init) {
       is_odometry_thread_init = true;
       qlist_map_curr.push_back(q_w_curr);
@@ -904,15 +933,11 @@ void odometryThread() {
       kdtreeSurfLast->setInputCloud(surfPointsLessFlat_last_ptr);
 
       for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter) {
-        printf("test point 1.");
-
         ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
         ceres::LocalParameterization *q_parameterization =
             new ceres::EigenQuaternionParameterization();
         ceres::Problem::Options problem_options;
         ceres::Problem problem(problem_options);
-
-        printf("test point 2.");
 
         problem.AddParameterBlock(q_last_curr.coeffs().data(), 4,
                                   q_parameterization);
@@ -922,12 +947,32 @@ void odometryThread() {
         std::vector<int> pointSearchInd;
         std::vector<float> pointSearchSqDis;
 
+        Eigen::Quaterniond q_temp(1, 0, 0, 0);
+        Eigen::Vector3d t_temp(0, 0, 0);
+
+        t_temp = t_pose_to_lidar + q_pose_to_lidar * t_last_curr;
+        q_temp = q_pose_to_lidar * q_last_curr;
+        t_temp = t_temp + q_temp * t_lidar_to_pose;
+        q_temp = q_temp * q_lidar_to_pose;
+
+        std::cout << "t_last_curr=(" << t_last_curr.x() << ","
+                  << t_last_curr.y() << "," << t_last_curr.z() << "),";
+        std::cout << "q_last_curr=(" << q_last_curr.coeffs().w() << ","
+                  << q_last_curr.coeffs().x() << "," << q_last_curr.coeffs().y()
+                  << "," << q_last_curr.coeffs().z() << ")" << std::endl;
+
+        std::cout << "t_temp=(" << t_temp.x() << "," << t_temp.y() << ","
+                  << t_temp.z() << "),";
+        std::cout << "q_temp=(" << q_temp.coeffs().w() << ","
+                  << q_temp.coeffs().x() << "," << q_temp.coeffs().y() << ","
+                  << q_temp.coeffs().z() << ")" << std::endl;
+
         // 建立边缘特征约束
         int cornerPointsSharpNum = cornerPointsSharp_curr.points.size();
         int corner_correspondence = 0;
         for (int i = 0; i < cornerPointsSharpNum; ++i) {
           TransformToStart(&(cornerPointsSharp_curr.points[i]), &pointSel,
-                           q_last_curr, t_last_curr);
+                           q_temp, t_temp);
           kdtreeCornerLast->nearestKSearch(pointSel, 1, pointSearchInd,
                                            pointSearchSqDis);
 
@@ -938,15 +983,18 @@ void odometryThread() {
                 cornerPointsLessSharp_last.points[closestPointInd].intensity);
 
             double minPointSqDis2 = DISTANCE_SQ_THRESHOLD;
-            // search in the direction of increasing scan line
+            // search in the direction
+            // of increasing scan line
             for (int j = closestPointInd + 1;
                  j < (int)cornerPointsLessSharp_last.points.size(); ++j) {
-              // if in the same scan line, continue
+              // if in the same scan
+              // line, continue
               if (int(cornerPointsLessSharp_last.points[j].intensity) <=
                   closestPointScanID)
                 continue;
 
-              // if not in nearby scans, end the loop
+              // if not in nearby scans,
+              // end the loop
               if (int(cornerPointsLessSharp_last.points[j].intensity) >
                   (closestPointScanID + NEARBY_SCAN))
                 break;
@@ -966,14 +1014,17 @@ void odometryThread() {
               }
             }
 
-            // search in the direction of decreasing scan line
+            // search in the direction
+            // of decreasing scan line
             for (int j = closestPointInd - 1; j >= 0; --j) {
-              // if in the same scan line, continue
+              // if in the same scan
+              // line, continue
               if (int(cornerPointsLessSharp_last.points[j].intensity) >=
                   closestPointScanID)
                 continue;
 
-              // if not in nearby scans, end the loop
+              // if not in nearby scans,
+              // end the loop
               if (int(cornerPointsLessSharp_last.points[j].intensity) <
                   (closestPointScanID - NEARBY_SCAN))
                 break;
@@ -993,8 +1044,10 @@ void odometryThread() {
               }
             }
           }
-          if (minPointInd2 >=
-              0)  // both closestPointInd and minPointInd2 is valid
+          if (minPointInd2 >= 0)  // both
+                                  // closestPointInd and
+                                  // minPointInd2 is
+                                  // valid
           {
             Eigen::Vector3d curr_point(cornerPointsSharp_curr.points[i].x,
                                        cornerPointsSharp_curr.points[i].y,
@@ -1015,8 +1068,9 @@ void odometryThread() {
                   SCAN_PERIOD;
             else
               s = 1.0;
-            ceres::CostFunction *cost_function = LidarEdgeFactor::Create(
-                curr_point, last_point_a, last_point_b, s);
+            ceres::CostFunction *cost_function =
+                LidarEdgeFactor2::Create(curr_point, last_point_a, last_point_b,
+                                         s, t_lidar_to_pose, q_lidar_to_pose);
             problem.AddResidualBlock(cost_function, loss_function,
                                      q_last_curr.coeffs().data(),
                                      t_last_curr.data());
@@ -1024,13 +1078,13 @@ void odometryThread() {
           }
         }
 
-        printf("test point 4.");
-        // find correspondence for plane features
+        // find correspondence for plane
+        // features
         int surfPointsFlatNum = cornerPointsSharp_curr.points.size();
         int plane_correspondence = 0;
         for (int i = 0; i < surfPointsFlatNum; ++i) {
           TransformToStart(&(cornerPointsSharp_curr.points[i]), &pointSel,
-                           q_last_curr, t_last_curr);
+                           q_temp, t_temp);
           kdtreeSurfLast->nearestKSearch(pointSel, 1, pointSearchInd,
                                          pointSearchSqDis);
 
@@ -1038,16 +1092,19 @@ void odometryThread() {
           if (pointSearchSqDis[0] < DISTANCE_SQ_THRESHOLD) {
             closestPointInd = pointSearchInd[0];
 
-            // get closest point's scan ID
+            // get closest point's scan
+            // ID
             int closestPointScanID =
                 int(surfPointsLessFlat_last.points[closestPointInd].intensity);
             double minPointSqDis2 = DISTANCE_SQ_THRESHOLD,
                    minPointSqDis3 = DISTANCE_SQ_THRESHOLD;
 
-            // search in the direction of increasing scan line
+            // search in the direction
+            // of increasing scan line
             for (int j = closestPointInd + 1;
                  j < (int)surfPointsLessFlat_last.points.size(); ++j) {
-              // if not in nearby scans, end the loop
+              // if not in nearby scans,
+              // end the loop
               if (int(surfPointsLessFlat_last.points[j].intensity) >
                   (closestPointScanID + NEARBY_SCAN))
                 break;
@@ -1060,14 +1117,16 @@ void odometryThread() {
                   (surfPointsLessFlat_last.points[j].z - pointSel.z) *
                       (surfPointsLessFlat_last.points[j].z - pointSel.z);
 
-              // if in the same or lower scan line
+              // if in the same or lower
+              // scan line
               if (int(surfPointsLessFlat_last.points[j].intensity) <=
                       closestPointScanID &&
                   pointSqDis < minPointSqDis2) {
                 minPointSqDis2 = pointSqDis;
                 minPointInd2 = j;
               }
-              // if in the higher scan line
+              // if in the higher scan
+              // line
               else if (int(surfPointsLessFlat_last.points[j].intensity) >
                            closestPointScanID &&
                        pointSqDis < minPointSqDis3) {
@@ -1076,9 +1135,11 @@ void odometryThread() {
               }
             }
 
-            // search in the direction of decreasing scan line
+            // search in the direction
+            // of decreasing scan line
             for (int j = closestPointInd - 1; j >= 0; --j) {
-              // if not in nearby scans, end the loop
+              // if not in nearby scans,
+              // end the loop
               if (int(surfPointsLessFlat_last.points[j].intensity) <
                   (closestPointScanID - NEARBY_SCAN))
                 break;
@@ -1091,7 +1152,8 @@ void odometryThread() {
                   (surfPointsLessFlat_last.points[j].z - pointSel.z) *
                       (surfPointsLessFlat_last.points[j].z - pointSel.z);
 
-              // if in the same or higher scan line
+              // if in the same or
+              // higher scan line
               if (int(surfPointsLessFlat_last.points[j].intensity) >=
                       closestPointScanID &&
                   pointSqDis < minPointSqDis2) {
@@ -1130,8 +1192,9 @@ void odometryThread() {
                     SCAN_PERIOD;
               else
                 s = 1.0;
-              ceres::CostFunction *cost_function = LidarPlaneFactor::Create(
-                  curr_point, last_point_a, last_point_b, last_point_c, s);
+              ceres::CostFunction *cost_function = LidarPlaneFactor2::Create(
+                  curr_point, last_point_a, last_point_b, last_point_c, s,
+                  t_lidar_to_pose, q_lidar_to_pose);
               problem.AddResidualBlock(cost_function, loss_function,
                                        q_last_curr.coeffs().data(),
                                        t_last_curr.data());
@@ -1140,13 +1203,18 @@ void odometryThread() {
           }
         }
 
-        printf("coner_correspondance %d, plane_correspondence %d \n",
-               corner_correspondence, plane_correspondence);
+        printf(
+            "coner_correspondance %d, "
+            "plane_correspondence %d "
+            "\n",
+            corner_correspondence, plane_correspondence);
 
         if ((corner_correspondence + plane_correspondence) < 10) {
           printf(
               "less correspondence! "
-              "*************************************************\n");
+              "************************"
+              "************************"
+              "*\n");
         }
         static int max_num_iter = 4;
         ceres::Solver::Options options;
@@ -1161,12 +1229,19 @@ void odometryThread() {
         if (solve_efficiency > 0.05) max_num_iter = max_num_iter + 1;
         if (solve_efficiency < 0.01) max_num_iter = max_num_iter - 1;
         if (max_num_iter < 2) max_num_iter = 2;
-        printf("solve_efficiency = %f %%, max_num_iter = %d.\n",
-               solve_efficiency * 100, max_num_iter);
+        printf(
+            "solve_efficiency = %f %%, "
+            "max_num_iter = %d.\n",
+            solve_efficiency * 100, max_num_iter);
       }
     }
     t_w_curr = t_w_curr + q_w_curr * t_last_curr;
     q_w_curr = q_w_curr * q_last_curr;
+
+    main_thread_mutex.lock();
+    q_w_curr_buf = q_w_curr;
+    t_w_curr_buf = t_w_curr;
+    main_thread_mutex.unlock();
 
     //保存到位姿列表和唯一列表
     //用于设置初始位姿
@@ -1296,7 +1371,6 @@ int main(int argc, char **argv) {
       (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
   right_camera_to_base_pose =
       (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0);
-
   lidar_to_base_pose =
       (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
 
@@ -1307,7 +1381,7 @@ int main(int argc, char **argv) {
   matcher = cv::DescriptorMatcher::create("BruteForce-Hamming");
 
   std::thread preprocess_thread{preprocessThread};
-  // std::thread odometry_thread{odometryThread};
+  std::thread odometry_thread{odometryThread};
   // std::thread mapping_thread{ mappingThread };
 
   ros::spin();
