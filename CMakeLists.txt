@@ -32,12 +32,15 @@ include_directories(
   ${CERES_INCLUDE_DIRS}
 )
 
+add_subdirectory(src/lib)
+
 add_executable(liso_node src/liso_node.cpp)
 target_link_libraries(liso_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES}
   ${PCL_LIBRARIES}
+  liso
   )
 
 ## Compile as C++11, supported in ROS Kinetic and newer
