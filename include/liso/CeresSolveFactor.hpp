@@ -83,7 +83,7 @@ struct LidarEdgeFactor2 {
         T(q_lidar_to_pose.w()), T(q_lidar_to_pose.x()), T(q_lidar_to_pose.y()),
         T(q_lidar_to_pose.z())};
     Eigen::Matrix<T, 3, 1> t_lidar_to_pose_T{
-        T(t_lidar_to_pose.x()), T(t_lidar_to_pose.y()), T(t_lidar_to_pose.y())};
+        T(t_lidar_to_pose.x()), T(t_lidar_to_pose.y()), T(t_lidar_to_pose.z())};
 
     Eigen::Quaternion<T> q_pose_to_lidar_T = q_lidar_to_pose_T.inverse();
     Eigen::Matrix<T, 3, 1> t_pose_to_lidar_T =
@@ -215,7 +215,7 @@ struct LidarPlaneFactor2 {
         T(q_lidar_to_pose.w()), T(q_lidar_to_pose.x()), T(q_lidar_to_pose.y()),
         T(q_lidar_to_pose.z())};
     Eigen::Matrix<T, 3, 1> t_lidar_to_pose_T{
-        T(t_lidar_to_pose.x()), T(t_lidar_to_pose.y()), T(t_lidar_to_pose.y())};
+        T(t_lidar_to_pose.x()), T(t_lidar_to_pose.y()), T(t_lidar_to_pose.z())};
 
     Eigen::Quaternion<T> q_pose_to_lidar_T = q_lidar_to_pose_T.inverse();
     Eigen::Matrix<T, 3, 1> t_pose_to_lidar_T =
@@ -361,4 +361,103 @@ struct ReprojectionError {
   Eigen::Matrix3d camera_matrix;
 
   double observed_x, observed_y, focal_x, focal_y, drift_x, drift_y;
+};
+
+struct ReprojectionError2 {
+  ReprojectionError2(const double observed_u_1_, const double observed_v_1_,
+                     const double observed_u_2_, const double observed_v_2_,
+                     const Eigen::Matrix3d &camera_matrix_,
+                     const Eigen::Vector3d &t_camera_to_pose_,
+                     const Eigen::Quaterniond &q_camera_to_pose_)
+      : observed_u_1(observed_u_1_),
+        observed_v_1(observed_v_1_),
+        observed_u_2(observed_u_2_),
+        observed_v_2(observed_v_2_),
+        camera_matrix(camera_matrix_),
+        t_camera_to_pose(t_camera_to_pose_),
+        q_camera_to_pose(q_camera_to_pose_) {
+    f_x = camera_matrix(0, 0);
+    f_y = camera_matrix(1, 1);
+    c_x = camera_matrix(0, 2);
+    c_y = camera_matrix(1, 2);
+
+    observed_x_1 = (observed_u_1 - c_x) / f_x;
+    observed_y_1 = (observed_v_1 - c_y) / f_y;
+    observed_z_1 = 1;
+
+    observed_x_2 = (observed_u_2 - c_x) / f_x;
+    observed_y_2 = (observed_v_2 - c_y) / f_y;
+    observed_z_2 = 1;
+
+    // printf("observed = ( %f , %f )\n", observed_x, observed_y);
+  }
+
+  // q_Quaternion(x, y, z, w), p_Vector3d(x,y,z),point(x,y)
+  template <typename T>
+  bool operator()(const T *q_ptr, const T *t_ptr, T *residuals) const {
+    Eigen::Matrix<T, 3, 1> t_last_curr(t_ptr[0], t_ptr[1], t_ptr[2]);
+    Eigen::Quaternion<T> q_last_curr(q_ptr[3], q_ptr[0], q_ptr[1], q_ptr[2]);
+    Eigen::Matrix<T, 3, 1> observed_1{T(observed_x_1), T(observed_y_1),
+                                      T(observed_z_1)};
+    Eigen::Matrix<T, 3, 1> observed_2{T(observed_x_2), T(observed_y_2),
+                                      T(observed_z_2)};
+
+    // std::cout << "observed_1 = \n" << observed_1 << std::endl;
+    // std::cout << "observed_2 = \n" << observed_2 << std::endl;
+
+    Eigen::Quaternion<T> q_camera_to_pose_T{
+        T(q_camera_to_pose.w()), T(q_camera_to_pose.x()),
+        T(q_camera_to_pose.y()), T(q_camera_to_pose.z())};
+    Eigen::Matrix<T, 3, 1> t_camera_to_pose_T{T(t_camera_to_pose.x()),
+                                              T(t_camera_to_pose.y()),
+                                              T(t_camera_to_pose.z())};
+
+    Eigen::Matrix<T, 3, 1> t_identity{T(0), T(0), T(0)};
+    Eigen::Quaternion<T> q_pose_to_camera_T = q_camera_to_pose_T.inverse();
+    Eigen::Matrix<T, 3, 1> t_pose_to_camera_T =
+        t_identity - q_pose_to_camera_T * t_camera_to_pose_T;
+
+    t_last_curr = t_pose_to_camera_T + q_pose_to_camera_T * t_last_curr;
+    q_last_curr = q_pose_to_camera_T * q_last_curr;
+    t_last_curr = t_last_curr + q_last_curr * t_camera_to_pose_T;
+    q_last_curr = q_last_curr * q_camera_to_pose_T;
+
+    observed_2 = t_last_curr + q_last_curr * observed_2;
+
+    // std::cout << "t_last_curr = \n" << t_last_curr << std::endl;
+    // std::cout << "observed_2 = \n" << observed_2 << std::endl;
+
+    Eigen::Matrix<T, 3, 1> temp1 = observed_1.cross(observed_2);
+    T temp2 = temp1.dot(t_last_curr);
+    T temp3 = temp2 / temp1.norm();
+
+    // std::cout << "temp1 = \n" << temp1 << std::endl;
+    // std::cout << "temp2 = \n" << temp2 << std::endl;
+    // std::cout << "temp3 = \n " << temp3;
+
+    residuals[0] = temp3;
+
+    return true;
+  }
+
+  static ceres::CostFunction *Create(
+      const double observed_u_last_, const double observed_v_last_,
+      const double observed_u_curr_, const double observed_v_curr_,
+      const Eigen::Matrix3d &camera_matrix_,
+      const Eigen::Vector3d &t_camera_to_pose_,
+      const Eigen::Quaterniond &q_camera_to_pose_) {
+    return (new ceres::AutoDiffCostFunction<ReprojectionError2, 1, 4, 3>(
+        new ReprojectionError2(observed_u_last_, observed_v_last_,
+                               observed_u_curr_, observed_v_curr_,
+                               camera_matrix_, t_camera_to_pose_,
+                               q_camera_to_pose_)));
+  }
+
+  Eigen::Matrix3d camera_matrix;
+  double f_x, f_y, c_x, c_y;
+  double observed_u_1, observed_v_1, observed_u_2, observed_v_2;
+  double observed_x_1, observed_y_1, observed_z_1;
+  double observed_x_2, observed_y_2, observed_z_2;
+  Eigen::Vector3d t_camera_to_pose;
+  Eigen::Quaterniond q_camera_to_pose;
 };
