@@ -36,7 +36,7 @@ class Accumulator {
       minx = x;
       maxx = x;
     }
-    N++;
+    ++N;
     s = s + (N - 1) / N * (x - m) * (x - m);
     m = m + (x - m) / N;
     if (x < minx) minx = x;

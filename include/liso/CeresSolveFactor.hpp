@@ -127,6 +127,78 @@ struct LidarEdgeFactor2 {
   Eigen::Quaterniond q_lidar_to_pose;
 };
 
+struct LidarEdgeFactor3 {
+  LidarEdgeFactor3(const Eigen::Vector3d &curr_point_,
+                   const Eigen::Vector3d &last_point_a_,
+                   const Eigen::Vector3d &last_point_b_, const double s_,
+                   const Eigen::Vector3d &t_last_curr_,
+                   const Eigen::Quaterniond &q_last_curr_)
+      : curr_point(curr_point_),
+        last_point_a(last_point_a_),
+        last_point_b(last_point_b_),
+        s(s_),
+        t_last_curr(t_last_curr_),
+        q_last_curr(q_last_curr_) {}
+
+  template <typename T>
+  bool operator()(const T *q, const T *t, T *residual) const {
+    Eigen::Matrix<T, 3, 1> cp{T(curr_point.x()), T(curr_point.y()),
+                              T(curr_point.z())};
+    Eigen::Matrix<T, 3, 1> lpa{T(last_point_a.x()), T(last_point_a.y()),
+                               T(last_point_a.z())};
+    Eigen::Matrix<T, 3, 1> lpb{T(last_point_b.x()), T(last_point_b.y()),
+                               T(last_point_b.z())};
+
+    Eigen::Quaternion<T> q_identity{T(1), T(0), T(0), T(0)};
+    Eigen::Matrix<T, 3, 1> t_identity{T(0), T(0), T(0)};
+
+    Eigen::Quaternion<T> q_lidar_to_pose_T{q[3], q[0], q[1], q[2]};
+    Eigen::Matrix<T, 3, 1> t_lidar_to_pose_T{t[0], t[1], t[2]};
+
+    Eigen::Quaternion<T> q_pose_to_lidar_T = q_lidar_to_pose_T.inverse();
+    Eigen::Matrix<T, 3, 1> t_pose_to_lidar_T =
+        t_identity - q_pose_to_lidar_T * t_lidar_to_pose_T;
+
+    Eigen::Quaternion<T> q_last_curr_T{T(q_last_curr.w()), T(q_last_curr.x()),
+                                       T(q_last_curr.y()), T(q_last_curr.z())};
+    Eigen::Matrix<T, 3, 1> t_last_curr_T{T(t_last_curr.x()), T(t_last_curr.y()),
+                                         T(t_last_curr.z())};
+
+    t_last_curr_T = t_pose_to_lidar_T + q_pose_to_lidar_T * t_last_curr_T;
+    q_last_curr_T = q_pose_to_lidar_T * q_last_curr_T;
+    t_last_curr_T = t_last_curr_T + q_last_curr_T * t_lidar_to_pose_T;
+    q_last_curr_T = q_last_curr_T * q_lidar_to_pose_T;
+
+    Eigen::Matrix<T, 3, 1> lp;
+    lp = q_last_curr_T * cp + t_last_curr_T;
+
+    Eigen::Matrix<T, 3, 1> nu = (lp - lpa).cross(lp - lpb);
+    Eigen::Matrix<T, 3, 1> de = lpa - lpb;
+
+    residual[0] = nu.x() / de.norm();
+    residual[1] = nu.y() / de.norm();
+    residual[2] = nu.z() / de.norm();
+
+    return true;
+  }
+
+  static ceres::CostFunction *Create(const Eigen::Vector3d &curr_point_,
+                                     const Eigen::Vector3d &last_point_a_,
+                                     const Eigen::Vector3d &last_point_b_,
+                                     const double s_,
+                                     const Eigen::Vector3d &t_last_curr_,
+                                     const Eigen::Quaterniond &q_last_curr_) {
+    return (new ceres::AutoDiffCostFunction<LidarEdgeFactor3, 3, 4, 3>(
+        new LidarEdgeFactor3(curr_point_, last_point_a_, last_point_b_, s_,
+                             t_last_curr_, q_last_curr_)));
+  }
+
+  Eigen::Vector3d curr_point, last_point_a, last_point_b;
+  double s;
+  Eigen::Vector3d t_last_curr;
+  Eigen::Quaterniond q_last_curr;
+};
+
 struct LidarPlaneFactor {
   LidarPlaneFactor(Eigen::Vector3d curr_point_, Eigen::Vector3d last_point_j_,
                    Eigen::Vector3d last_point_l_, Eigen::Vector3d last_point_m_,
@@ -162,7 +234,9 @@ struct LidarPlaneFactor {
     Eigen::Matrix<T, 3, 1> lp;
     lp = q_last_curr * cp + t_last_curr;
 
-    residual[0] = (lp - lpj).dot(ljm);
+    residual[0] = (lp - lpj).x() * ljm.x();
+    residual[1] = (lp - lpj).y() * ljm.y();
+    residual[2] = (lp - lpj).z() * ljm.z();
 
     return true;
   }
@@ -172,7 +246,7 @@ struct LidarPlaneFactor {
                                      const Eigen::Vector3d last_point_l_,
                                      const Eigen::Vector3d last_point_m_,
                                      const double s_) {
-    return (new ceres::AutoDiffCostFunction<LidarPlaneFactor, 1, 4, 3>(
+    return (new ceres::AutoDiffCostFunction<LidarPlaneFactor, 3, 4, 3>(
         new LidarPlaneFactor(curr_point_, last_point_j_, last_point_l_,
                              last_point_m_, s_)));
   }
@@ -233,7 +307,9 @@ struct LidarPlaneFactor2 {
     Eigen::Matrix<T, 3, 1> lp;
     lp = q_last_curr * cp + t_last_curr;
 
-    residual[0] = (lp - lpj).dot(ljm);
+    residual[0] = (lp - lpj).x() * ljm.x();
+    residual[1] = (lp - lpj).y() * ljm.y();
+    residual[2] = (lp - lpj).z() * ljm.z();
 
     return true;
   }
@@ -428,14 +504,15 @@ struct ReprojectionError2 {
     // std::cout << "observed_2 = \n" << observed_2 << std::endl;
 
     Eigen::Matrix<T, 3, 1> temp1 = observed_1.cross(observed_2);
-    T temp2 = temp1.dot(t_last_curr);
-    T temp3 = temp2 / temp1.norm();
+    T temp2 = temp1.norm();
 
     // std::cout << "temp1 = \n" << temp1 << std::endl;
     // std::cout << "temp2 = \n" << temp2 << std::endl;
     // std::cout << "temp3 = \n " << temp3;
 
-    residuals[0] = temp3;
+    residuals[0] = temp1.x() * t_last_curr.x() / temp2;
+    residuals[1] = temp1.y() * t_last_curr.y() / temp2;
+    residuals[2] = temp1.z() * t_last_curr.z() / temp2;
 
     return true;
   }
@@ -446,7 +523,7 @@ struct ReprojectionError2 {
       const Eigen::Matrix3d &camera_matrix_,
       const Eigen::Vector3d &t_camera_to_pose_,
       const Eigen::Quaterniond &q_camera_to_pose_) {
-    return (new ceres::AutoDiffCostFunction<ReprojectionError2, 1, 4, 3>(
+    return (new ceres::AutoDiffCostFunction<ReprojectionError2, 3, 4, 3>(
         new ReprojectionError2(observed_u_last_, observed_v_last_,
                                observed_u_curr_, observed_v_curr_,
                                camera_matrix_, t_camera_to_pose_,
