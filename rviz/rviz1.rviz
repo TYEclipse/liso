@@ -54,9 +54,9 @@ Visualization Manager:
         X: 0
         Y: 0
         Z: 0
-      Plane: XY
+      Plane: XZ
       Plane Cell Count: 100
-      Reference Frame: kitti_velo_link
+      Reference Frame: kitti_odom_link
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -258,9 +258,9 @@ Visualization Manager:
           Value: true
         kitti_base_link:
           Value: true
-        kitti_velo_link:
+        kitti_odom_link:
           Value: true
-        kitti_world_link:
+        kitti_velo_link:
           Value: true
         world:
           Value: true
@@ -270,7 +270,7 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        kitti_world_link:
+        kitti_odom_link:
           kitti_base_link:
             kitti_velo_link:
               {}
@@ -280,7 +280,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Default Light: true
-    Fixed Frame: kitti_world_link
+    Fixed Frame: kitti_odom_link
     Frame Rate: 30
   Name: root
   Tools:
