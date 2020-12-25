@@ -319,7 +319,7 @@ struct LidarPlaneFactor2 {
       const Eigen::Vector3d last_point_l_, const Eigen::Vector3d last_point_m_,
       const double s_, const Eigen::Vector3d &t_lidar_to_pose_,
       const Eigen::Quaterniond &q_lidar_to_pose_) {
-    return (new ceres::AutoDiffCostFunction<LidarPlaneFactor2, 1, 4, 3>(
+    return (new ceres::AutoDiffCostFunction<LidarPlaneFactor2, 3, 4, 3>(
         new LidarPlaneFactor2(curr_point_, last_point_j_, last_point_l_,
                               last_point_m_, s_, t_lidar_to_pose_,
                               q_lidar_to_pose_)));
@@ -330,6 +330,106 @@ struct LidarPlaneFactor2 {
   double s;
   Eigen::Vector3d t_lidar_to_pose;
   Eigen::Quaterniond q_lidar_to_pose;
+};
+
+struct LidarPlaneNormFactor2 {
+  LidarPlaneNormFactor2(const Eigen::Vector3d &curr_point_,
+                        const Eigen::Vector3d &plane_unit_norm_,
+                        const double negative_OA_dot_norm_,
+                        const Eigen::Vector3d &t_lidar_to_pose_,
+                        const Eigen::Quaterniond &q_lidar_to_pose_)
+      : curr_point(curr_point_),
+        plane_unit_norm(plane_unit_norm_),
+        negative_OA_dot_norm(negative_OA_dot_norm_),
+        t_lidar_to_pose(t_lidar_to_pose_),
+        q_lidar_to_pose(q_lidar_to_pose_) {}
+
+  template <typename T>
+  bool operator()(const T *q, const T *t, T *residual) const {
+    Eigen::Quaternion<T> q_identity{T(1), T(0), T(0), T(0)};
+    Eigen::Matrix<T, 3, 1> t_identity{T(0), T(0), T(0)};
+
+    Eigen::Quaternion<T> q_lidar_to_pose_T{
+        T(q_lidar_to_pose.w()), T(q_lidar_to_pose.x()), T(q_lidar_to_pose.y()),
+        T(q_lidar_to_pose.z())};
+    Eigen::Matrix<T, 3, 1> t_lidar_to_pose_T{
+        T(t_lidar_to_pose.x()), T(t_lidar_to_pose.y()), T(t_lidar_to_pose.z())};
+
+    Eigen::Quaternion<T> q_pose_to_lidar_T = q_lidar_to_pose_T.inverse();
+    Eigen::Matrix<T, 3, 1> t_pose_to_lidar_T =
+        t_identity - q_pose_to_lidar_T * t_lidar_to_pose_T;
+
+    Eigen::Quaternion<T> q_w_curr{q[3], q[0], q[1], q[2]};
+    Eigen::Matrix<T, 3, 1> t_w_curr{t[0], t[1], t[2]};
+    t_w_curr = t_pose_to_lidar_T + q_pose_to_lidar_T * t_w_curr;
+    q_w_curr = q_pose_to_lidar_T * q_w_curr;
+    t_w_curr = t_w_curr + q_w_curr * t_lidar_to_pose_T;
+    q_w_curr = q_w_curr * q_lidar_to_pose_T;
+
+    Eigen::Matrix<T, 3, 1> cp{T(curr_point.x()), T(curr_point.y()),
+                              T(curr_point.z())};
+    Eigen::Matrix<T, 3, 1> point_w;
+    point_w = q_w_curr * cp + t_w_curr;
+
+    Eigen::Matrix<T, 3, 1> norm(T(plane_unit_norm.x()), T(plane_unit_norm.y()),
+                                T(plane_unit_norm.z()));
+    residual[0] = norm.dot(point_w) + T(negative_OA_dot_norm);
+    return true;
+  }
+
+  static ceres::CostFunction *Create(
+      const Eigen::Vector3d &curr_point_,
+      const Eigen::Vector3d &plane_unit_norm_,
+      const double negative_OA_dot_norm_,
+      const Eigen::Vector3d &t_lidar_to_pose_,
+      const Eigen::Quaterniond &q_lidar_to_pose_) {
+    return (new ceres::AutoDiffCostFunction<LidarPlaneNormFactor2, 1, 4, 3>(
+        new LidarPlaneNormFactor2(curr_point_, plane_unit_norm_,
+                                  negative_OA_dot_norm_, t_lidar_to_pose_,
+                                  q_lidar_to_pose_)));
+  }
+
+  Eigen::Vector3d curr_point;
+  Eigen::Vector3d plane_unit_norm;
+  double negative_OA_dot_norm;
+  Eigen::Vector3d t_lidar_to_pose;
+  Eigen::Quaterniond q_lidar_to_pose;
+};
+
+struct LidarPlaneNormFactor {
+  LidarPlaneNormFactor(Eigen::Vector3d curr_point_,
+                       Eigen::Vector3d plane_unit_norm_,
+                       double negative_OA_dot_norm_)
+      : curr_point(curr_point_),
+        plane_unit_norm(plane_unit_norm_),
+        negative_OA_dot_norm(negative_OA_dot_norm_) {}
+
+  template <typename T>
+  bool operator()(const T *q, const T *t, T *residual) const {
+    Eigen::Quaternion<T> q_w_curr{q[3], q[0], q[1], q[2]};
+    Eigen::Matrix<T, 3, 1> t_w_curr{t[0], t[1], t[2]};
+    Eigen::Matrix<T, 3, 1> cp{T(curr_point.x()), T(curr_point.y()),
+                              T(curr_point.z())};
+    Eigen::Matrix<T, 3, 1> point_w;
+    point_w = q_w_curr * cp + t_w_curr;
+
+    Eigen::Matrix<T, 3, 1> norm(T(plane_unit_norm.x()), T(plane_unit_norm.y()),
+                                T(plane_unit_norm.z()));
+    residual[0] = norm.dot(point_w) + T(negative_OA_dot_norm);
+    return true;
+  }
+
+  static ceres::CostFunction *Create(const Eigen::Vector3d curr_point_,
+                                     const Eigen::Vector3d plane_unit_norm_,
+                                     const double negative_OA_dot_norm_) {
+    return (new ceres::AutoDiffCostFunction<LidarPlaneNormFactor, 1, 4, 3>(
+        new LidarPlaneNormFactor(curr_point_, plane_unit_norm_,
+                                 negative_OA_dot_norm_)));
+  }
+
+  Eigen::Vector3d curr_point;
+  Eigen::Vector3d plane_unit_norm;
+  double negative_OA_dot_norm;
 };
 
 struct PoseGraph3dFactor {
