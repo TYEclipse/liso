@@ -5,13 +5,13 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /Global Options1
+        - /Grid1
         - /PointCloud21
         - /PointCloud22
         - /Odometry1
         - /PointCloud25
         - /PointCloud25/Status1
         - /TF1
-        - /TF1/Status1
       Splitter Ratio: 0.5
     Tree Height: 716
   - Class: rviz/Selection
@@ -32,7 +32,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: PointCloud2
+    SyncSource: ""
 Preferences:
   PromptSaveOnExit: true
 Toolbars:
@@ -56,7 +56,7 @@ Visualization Manager:
         Z: 0
       Plane: XY
       Plane Cell Count: 100
-      Reference Frame: <Fixed Frame>
+      Reference Frame: kitti_velo_link
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -260,109 +260,7 @@ Visualization Manager:
           Value: true
         kitti_velo_link:
           Value: true
-        robot1_tf/amovCar/imu_link:
-          Value: true
-        robot1_tf/back_left_wheel:
-          Value: true
-        robot1_tf/back_right_wheel:
-          Value: true
-        robot1_tf/base_footprint:
-          Value: true
-        robot1_tf/base_link:
-          Value: true
-        robot1_tf/front_bumper:
-          Value: true
-        robot1_tf/front_left_wheel:
-          Value: true
-        robot1_tf/front_right_wheel:
-          Value: true
-        robot1_tf/laser:
-          Value: true
-        robot1_tf/odom:
-          Value: true
-        robot1_tf/rear_bumper:
-          Value: true
-        robot1_tf/top_plate:
-          Value: true
-        robot1_tf/user_rail:
-          Value: true
-        robot2_tf/amovCar/imu_link:
-          Value: true
-        robot2_tf/back_left_wheel:
-          Value: true
-        robot2_tf/back_right_wheel:
-          Value: true
-        robot2_tf/base_footprint:
-          Value: true
-        robot2_tf/base_link:
-          Value: true
-        robot2_tf/front_bumper:
-          Value: true
-        robot2_tf/front_left_wheel:
-          Value: true
-        robot2_tf/front_right_wheel:
-          Value: true
-        robot2_tf/laser:
-          Value: true
-        robot2_tf/odom:
-          Value: true
-        robot2_tf/rear_bumper:
-          Value: true
-        robot2_tf/top_plate:
-          Value: true
-        robot2_tf/user_rail:
-          Value: true
-        robot3_tf/amovCar/imu_link:
-          Value: true
-        robot3_tf/back_left_wheel:
-          Value: true
-        robot3_tf/back_right_wheel:
-          Value: true
-        robot3_tf/base_footprint:
-          Value: true
-        robot3_tf/base_link:
-          Value: true
-        robot3_tf/front_bumper:
-          Value: true
-        robot3_tf/front_left_wheel:
-          Value: true
-        robot3_tf/front_right_wheel:
-          Value: true
-        robot3_tf/laser:
-          Value: true
-        robot3_tf/odom:
-          Value: true
-        robot3_tf/rear_bumper:
-          Value: true
-        robot3_tf/top_plate:
-          Value: true
-        robot3_tf/user_rail:
-          Value: true
-        robot4_tf/amovCar/imu_link:
-          Value: true
-        robot4_tf/back_left_wheel:
-          Value: true
-        robot4_tf/back_right_wheel:
-          Value: true
-        robot4_tf/base_footprint:
-          Value: true
-        robot4_tf/base_link:
-          Value: true
-        robot4_tf/front_bumper:
-          Value: true
-        robot4_tf/front_left_wheel:
-          Value: true
-        robot4_tf/front_right_wheel:
-          Value: true
-        robot4_tf/laser:
-          Value: true
-        robot4_tf/odom:
-          Value: true
-        robot4_tf/rear_bumper:
-          Value: true
-        robot4_tf/top_plate:
-          Value: true
-        robot4_tf/user_rail:
+        kitti_world_link:
           Value: true
         world:
           Value: true
@@ -372,17 +270,17 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        kitti_base_link:
-          {}
-        kitti_velo_link:
-          {}
+        kitti_world_link:
+          kitti_base_link:
+            kitti_velo_link:
+              {}
       Update Interval: 0
       Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
     Default Light: true
-    Fixed Frame: kitti_velo_link
+    Fixed Frame: kitti_world_link
     Frame Rate: 30
   Name: root
   Tools:

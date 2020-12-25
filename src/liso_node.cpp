@@ -104,6 +104,15 @@ static pcl::PointCloud<PointType> surfPointsLessFlat_buf;
 static std::mutex odometry_thread_mutex;
 static bool is_odometry_thread_ready;
 
+//建图线程的缓存变量
+static pcl::PointCloud<PointType> laserCloudCorner_buf;
+static pcl::PointCloud<PointType> laserCloudSurf_buf;
+static Eigen::Quaterniond q_odom_curr_buf;
+static Eigen::Vector3d t_odom_curr_buf;
+static std::mutex mapping_thread_mutex;
+static bool is_mapping_thread_ready;
+
+
 inline cv::Scalar get_color(float depth) {
   static Accumulator<float> depth_range(50);
   if (depth < 4 * depth_range.mean() && depth > -2 * depth_range.mean())
@@ -224,7 +233,7 @@ void robustMatch2(const cv::Mat &queryDescriptors,
     if (matches_1[i].distance < matcher_distances.mean() * filer_rate)
       matches.push_back(matches_1[i]);
   }
-  printf("matcher_distances.mean = %f\n", matcher_distances.mean());
+  // printf("matcher_distances.mean = %f\n", matcher_distances.mean());
 }
 
 //去除指定半径内的点
@@ -662,11 +671,11 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
                                          ros::Time::now(), "kitti_base_link",
                                          "kitti_velo_link"));
   tf_list.push_back(tf::StampedTransform(tf_base_to_world_pose,
-                                         ros::Time::now(), "kitti_world_link",
+                                         ros::Time::now(), "kitti_odom_link",
                                          "kitti_base_link"));
 
   nav_msgs::Odometry laserOdometry;
-  laserOdometry.header.frame_id = "kitti_world_link";
+  laserOdometry.header.frame_id = "kitti_odom_link";
   laserOdometry.child_frame_id = "kitti_base_link";
   laserOdometry.header.stamp = ros::Time::now();
   laserOdometry.pose.pose.orientation.x = q_w_curr_new.x();
@@ -887,6 +896,25 @@ void preprocessThread() {
   }
 }
 
+void updateFilterRate(float &visual_rate, float &lidar_rate,
+                      const int visual_num, const int lidar_num,
+                      const double cost_time) {
+  double sum_num = visual_num + lidar_num;
+  double visual_rate_diff = visual_num / sum_num;
+  double lidar_rate_diff = lidar_num / sum_num;
+  if (sum_num > 0) {
+    if (cost_time > 90) {
+      visual_rate = visual_rate * (1. - 0.1 * visual_rate_diff);
+      lidar_rate = lidar_rate * (1. - 0.1 * lidar_rate_diff);
+    } else if (cost_time < 72) {
+      visual_rate = visual_rate * (1. + 0.1 * visual_rate_diff);
+      lidar_rate = lidar_rate * (1. + 0.1 * lidar_rate_diff);
+      visual_rate = visual_rate > 1 ? 1 : visual_rate;
+      lidar_rate = lidar_rate > 1 ? 1 : lidar_rate;
+    }
+  }
+}
+
 void odometryThread() {
   while (1) {
     //-- 第0步：线程休眠,时长为线程运行时常
@@ -971,8 +999,8 @@ void odometryThread() {
     Eigen::Vector3d t_pose_to_right_camera =
         t_identity - q_pose_to_right_camera * t_right_camera_to_pose;
 
-    static float visual_rate = 0.69;
-    static float lidar_rate = 0.30;
+    static float visual_rate = 1;
+    static float lidar_rate = 1;
 
     printf("visual_rate = %f, lidar_rate = %f\n", visual_rate, lidar_rate);
     int visual_num = 0;
@@ -994,11 +1022,12 @@ void odometryThread() {
       robustMatch2(descriptors_right_curr, descriptors_right_last,
                    matches_right, visual_rate);
 
-      printf("good_matches_stereo_curr = %d, good_matches_stereo_last = %d\n",
-             int(good_matches_stereo_curr.size()),
-             int(good_matches_stereo_last.size()));
-      printf("matches_left = %d, matches_left = %d\n", int(matches_left.size()),
-             int(matches_right.size()));
+      // printf("good_matches_stereo_curr = %d, good_matches_stereo_last =
+      // %d\n",
+      //        int(good_matches_stereo_curr.size()),
+      //        int(good_matches_stereo_last.size()));
+      // printf("matches_left = %d, matches_right = %d\n",
+      //        int(matches_left.size()), int(matches_right.size()));
 
       pcl::PointCloud<PointType>::Ptr cornerPointsLessSharp_last_ptr(
           new pcl::PointCloud<PointType>(cornerPointsLessSharp_last));
@@ -1014,7 +1043,8 @@ void odometryThread() {
       int opti_counter_limit = 2;
       for (size_t opti_counter = 0; opti_counter < opti_counter_limit;
            ++opti_counter) {
-        ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
+        ceres::LossFunction *loss_function1 = new ceres::HuberLoss(50);
+        ceres::LossFunction *loss_function2 = new ceres::HuberLoss(0.2);
         ceres::LocalParameterization *q_parameterization =
             new ceres::EigenQuaternionParameterization();
         ceres::Problem::Options problem_options;
@@ -1035,19 +1065,6 @@ void odometryThread() {
         q_temp = q_pose_to_lidar * q_last_curr;
         t_temp = t_temp + q_temp * t_lidar_to_pose;
         q_temp = q_temp * q_lidar_to_pose;
-
-        // std::cout << "t_last_curr=(" << t_last_curr.x() << ","
-        //           << t_last_curr.y() << "," << t_last_curr.z() << "),";
-        // std::cout << "q_last_curr=(" << q_last_curr.coeffs().w() << ","
-        //           << q_last_curr.coeffs().x() << "," <<
-        //           q_last_curr.coeffs().y()
-        //           << "," << q_last_curr.coeffs().z() << ")" << std::endl;
-
-        // std::cout << "t_temp=(" << t_temp.x() << "," << t_temp.y() << ","
-        //           << t_temp.z() << "),";
-        // std::cout << "q_temp=(" << q_temp.coeffs().w() << ","
-        //           << q_temp.coeffs().x() << "," << q_temp.coeffs().y() << ","
-        //           << q_temp.coeffs().z() << ")" << std::endl;
 
         int left_camera_correspondence = 0;
         for (size_t i = 0; i < matches_left.size(); ++i) {
@@ -1081,7 +1098,7 @@ void odometryThread() {
           ceres::CostFunction *cost_function = ReprojectionError2::Create(
               pt_last.x, pt_last.y, pt_curr.x, pt_curr.y, left_camera_matrix,
               t_left_camera_to_pose, q_left_camera_to_pose);
-          problem.AddResidualBlock(cost_function, loss_function,
+          problem.AddResidualBlock(cost_function, loss_function2,
                                    q_last_curr.coeffs().data(),
                                    t_last_curr.data());
           left_camera_correspondence++;
@@ -1120,7 +1137,7 @@ void odometryThread() {
           ceres::CostFunction *cost_function = ReprojectionError2::Create(
               pt_last.x, pt_last.y, pt_curr.x, pt_curr.y, right_camera_matrix,
               t_right_camera_to_pose, q_right_camera_to_pose);
-          problem.AddResidualBlock(cost_function, loss_function,
+          problem.AddResidualBlock(cost_function, loss_function2,
                                    q_last_curr.coeffs().data(),
                                    t_last_curr.data());
           right_camera_correspondence++;
@@ -1234,7 +1251,7 @@ void odometryThread() {
             ceres::CostFunction *cost_function =
                 LidarEdgeFactor2::Create(curr_point, last_point_a, last_point_b,
                                          s, t_lidar_to_pose, q_lidar_to_pose);
-            problem.AddResidualBlock(cost_function, loss_function,
+            problem.AddResidualBlock(cost_function, loss_function1,
                                      q_last_curr.coeffs().data(),
                                      t_last_curr.data());
             corner_correspondence++;
@@ -1359,7 +1376,7 @@ void odometryThread() {
               ceres::CostFunction *cost_function = LidarPlaneFactor2::Create(
                   curr_point, last_point_a, last_point_b, last_point_c, s,
                   t_lidar_to_pose, q_lidar_to_pose);
-              problem.AddResidualBlock(cost_function, loss_function,
+              problem.AddResidualBlock(cost_function, loss_function1,
                                        q_last_curr.coeffs().data(),
                                        t_last_curr.data());
               plane_correspondence++;
@@ -1378,14 +1395,18 @@ void odometryThread() {
         visual_num += left_camera_correspondence + right_camera_correspondence;
         lidar_num += corner_correspondence + plane_correspondence;
 
-        printf("distance_threshold.mean = %f\n", distance_threshold.mean());
-        if ((corner_correspondence + plane_correspondence) < 10) {
+        // printf("distance_threshold.mean = %f\n", distance_threshold.mean());
+        if ((corner_correspondence + plane_correspondence) < 10)
           printf(
-              "less correspondence! "
-              "************************"
-              "************************"
-              "*\n");
-        }
+              "LESS LIDAR "
+              "correspondence!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+              "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+        if ((left_camera_correspondence + right_camera_correspondence) < 10)
+          printf(
+              "LESS CAMERA "
+              "correspondence!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+              "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+
         ceres::Solver::Options options;
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);
@@ -1403,6 +1424,8 @@ void odometryThread() {
     q_w_curr_buf = q_w_curr;
     t_w_curr_buf = t_w_curr;
     main_thread_mutex.unlock();
+
+    printf("t_w_curr = %f\n", t_w_curr.norm());
 
     //保存到位姿列表和唯一列表
     //用于设置初始位姿
@@ -1423,22 +1446,35 @@ void odometryThread() {
     surfPointsFlat_last = surfPointsFlat_curr;
     surfPointsLessFlat_last = surfPointsLessFlat_curr;
 
+static pcl::PointCloud<PointType> laserCloudCorner_buf;
+static pcl::PointCloud<PointType> laserCloudSurf_buf;
+static std::mutex mapping_thread_mutex;
+static bool is_mapping_thread_ready;
+
     end_time = std::chrono::high_resolution_clock::now();
     elapsed_duration = end_time - start_time;
-    ROS_INFO("odometryThread End, cost time %f ms.\n",
-             elapsed_duration.count());
-
     double cost_time = elapsed_duration.count();
-    double sum_num = visual_num + lidar_num;
-    if (sum_num > 0) {
-      if (cost_time > 90) {
-        visual_rate = visual_rate * (1 - 0.1 * visual_num / sum_num);
-        lidar_rate = lidar_rate * (1 - 0.1 * lidar_num / sum_num);
-      } else if (cost_time < 72) {
-        visual_rate = visual_rate * (1 + 0.1 * visual_num / sum_num);
-        lidar_rate = lidar_rate * (1 + 0.1 * lidar_num / sum_num);
-      }
-    }
+    ROS_INFO("odometryThread End, cost time %f ms.\n", cost_time);
+
+    updateFilterRate(visual_rate, lidar_rate, visual_num, lidar_num, cost_time);
+  }
+}
+
+void mappingThread() {
+  while (1) {
+    //-- 第0步：线程休眠,时长为线程运行时常
+    static auto start_time = std::chrono::high_resolution_clock::now();
+    static auto end_time = std::chrono::high_resolution_clock::now();
+    static std::chrono::duration<double, std::milli> elapsed_duration =
+        end_time - start_time;
+    std::this_thread::sleep_for(elapsed_duration * 10);
+
+    start_time = std::chrono::high_resolution_clock::now();
+    ROS_INFO("mappingThread Start\n");
+
+    end_time = std::chrono::high_resolution_clock::now();
+    elapsed_duration = end_time - start_time;
+    ROS_INFO("mappingThread End, cost time %f ms.\n", elapsed_duration.count());
   }
 }
 
@@ -1551,10 +1587,6 @@ int main(int argc, char **argv) {
   // std::thread mapping_thread{ mappingThread };
 
   ros::spin();
-
-  while (ros::ok()) {
-    ros::spinOnce();
-  }
 
   ROS_INFO("liso Stop\n");
 }
