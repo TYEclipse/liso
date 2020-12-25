@@ -238,7 +238,8 @@ void robustMatch2(const cv::Mat &queryDescriptors,
 //去除指定半径内的点
 template <typename PointT>
 void removeClosedPointCloud(const pcl::PointCloud<PointT> &cloud_in,
-                            pcl::PointCloud<PointT> &cloud_out, float thres) {
+                            pcl::PointCloud<PointT> &cloud_out, float min_thres,
+                            float max_thres) {
   if (&cloud_in != &cloud_out) {
     cloud_out.header = cloud_in.header;
     cloud_out.points.resize(cloud_in.points.size());
@@ -247,11 +248,10 @@ void removeClosedPointCloud(const pcl::PointCloud<PointT> &cloud_in,
   size_t j = 0;
 
   for (size_t i = 0; i < cloud_in.points.size(); ++i) {
-    if (cloud_in.points[i].x * cloud_in.points[i].x +
-            cloud_in.points[i].y * cloud_in.points[i].y +
-            cloud_in.points[i].z * cloud_in.points[i].z <
-        thres * thres)
-      continue;
+    float dist = sqrt(cloud_in.points[i].x * cloud_in.points[i].x +
+                      cloud_in.points[i].y * cloud_in.points[i].y +
+                      cloud_in.points[i].z * cloud_in.points[i].z);
+    if (dist < min_thres || dist > max_thres) continue;
     cloud_out.points[j] = cloud_in.points[i];
     j++;
   }
@@ -675,6 +675,9 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   tf_list.push_back(tf::StampedTransform(tf_left_camera_to_base_pose,
                                          ros::Time::now(), "kitti_base_link",
                                          "kitti_velo_link"));
+  tf_list.push_back(tf::StampedTransform(tf_left_camera_to_base_pose,
+                                         ros::Time::now(), "kitti_map_link",
+                                         "kitti_map_velo_link"));
   tf_list.push_back(tf::StampedTransform(tf_base_to_world_pose,
                                          ros::Time::now(), "kitti_odom_link",
                                          "kitti_base_link"));
@@ -821,7 +824,8 @@ void preprocessThread() {
     //-- 第11步：消除无意义点和距离为零的点
     std::vector<int> indices;
     pcl::removeNaNFromPointCloud(*laserCloudIn, *laserCloudIn, indices);
-    removeClosedPointCloud(*laserCloudIn, *laserCloudIn, RES_RANGE);
+    removeClosedPointCloud(*laserCloudIn, *laserCloudIn, 2 * RES_RANGE,
+                           0.5 * MAX_RANGE);
 
     //-- 第12步：计算点云每条线的曲率
     float startOri, endOri;
@@ -986,26 +990,27 @@ void odometryThread() {
     right_camera_matrix << 718.856, 0.0, 607.1928, 0.0, 718.856, 185.2157, 0.0,
         0.0, 1.0;
 
+    static Eigen::Quaterniond q_identity(1, 0, 0, 0);
+    static Eigen::Vector3d t_identity(0, 0, 0);
+
     static Eigen::Quaterniond q_lidar_to_pose(0.5, 0.5, -0.5, 0.5);
     static Eigen::Vector3d t_lidar_to_pose(0., -0.08, -0.27);
     static Eigen::Quaterniond q_pose_to_lidar = q_lidar_to_pose.inverse();
     static Eigen::Vector3d t_pose_to_lidar =
-        Eigen::Vector3d::Identity() - q_pose_to_lidar * t_lidar_to_pose;
+        t_identity - q_pose_to_lidar * t_lidar_to_pose;
 
     static Eigen::Quaterniond q_left_camera_to_pose(1, 0, 0, 0);
     static Eigen::Vector3d t_left_camera_to_pose(0, 0, 0);
     Eigen::Quaterniond q_pose_to_left_camera = q_left_camera_to_pose.inverse();
     Eigen::Vector3d t_pose_to_left_camera =
-        Eigen::Vector3d::Identity() -
-        q_pose_to_left_camera * t_left_camera_to_pose;
+        t_identity - q_pose_to_left_camera * t_left_camera_to_pose;
 
     static Eigen::Quaterniond q_right_camera_to_pose(1, 0, 0, 0);
     static Eigen::Vector3d t_right_camera_to_pose(0.54, 0, 0);
     Eigen::Quaterniond q_pose_to_right_camera =
         q_right_camera_to_pose.inverse();
     Eigen::Vector3d t_pose_to_right_camera =
-        Eigen::Vector3d::Identity() -
-        q_pose_to_right_camera * t_right_camera_to_pose;
+        t_identity - q_pose_to_right_camera * t_right_camera_to_pose;
 
     static float visual_rate = 1;
     static float lidar_rate = 1;
@@ -1041,9 +1046,9 @@ void odometryThread() {
           new pcl::PointCloud<PointType>(cornerPointsLessSharp_last));
       pcl::PointCloud<PointType>::Ptr surfPointsLessFlat_last_ptr(
           new pcl::PointCloud<PointType>(surfPointsLessFlat_last));
-      static pcl::KdTreeFLANN<PointType>::Ptr kdtreeCornerLast(
+      pcl::KdTreeFLANN<PointType>::Ptr kdtreeCornerLast(
           new pcl::KdTreeFLANN<PointType>());
-      static pcl::KdTreeFLANN<PointType>::Ptr kdtreeSurfLast(
+      pcl::KdTreeFLANN<PointType>::Ptr kdtreeSurfLast(
           new pcl::KdTreeFLANN<PointType>());
       kdtreeCornerLast->setInputCloud(cornerPointsLessSharp_last_ptr);
       kdtreeSurfLast->setInputCloud(surfPointsLessFlat_last_ptr);
@@ -1076,84 +1081,81 @@ void odometryThread() {
         q_temp = q_temp * q_lidar_to_pose;
 
         int left_camera_correspondence = 0;
-        // for (size_t i = 0; i < matches_left.size(); ++i) {
-        //   auto pt_curr = imgPoints_left_curr[matches_left[i].queryIdx];
-        //   auto pt_last = imgPoints_left_last[matches_left[i].trainIdx];
+        for (size_t i = 0; i < matches_left.size(); ++i) {
+          auto pt_curr = imgPoints_left_curr[matches_left[i].queryIdx];
+          auto pt_last = imgPoints_left_last[matches_left[i].trainIdx];
 
-        //   double f_x = left_camera_matrix(0, 0);
-        //   double f_y = left_camera_matrix(1, 1);
-        //   double c_x = left_camera_matrix(0, 2);
-        //   double c_y = left_camera_matrix(1, 2);
+          double f_x = left_camera_matrix(0, 0);
+          double f_y = left_camera_matrix(1, 1);
+          double c_x = left_camera_matrix(0, 2);
+          double c_y = left_camera_matrix(1, 2);
 
-        //   Eigen::Vector3d observed_1((pt_last.x - c_x) / f_x,
-        //                              (pt_last.y - c_y) / f_y, 1);
-        //   Eigen::Vector3d observed_2((pt_curr.x - c_x) / f_x,
-        //                              (pt_curr.y - c_y) / f_y, 1);
-        //   Eigen::Quaterniond q_last_curr_T = q_last_curr;
-        //   Eigen::Vector3d t_last_curr_T = t_last_curr;
-        //   t_last_curr_T =
-        //       t_pose_to_left_camera + q_pose_to_left_camera * t_last_curr_T;
-        //   q_last_curr_T = q_pose_to_left_camera * q_last_curr_T;
-        //   t_last_curr_T = t_last_curr_T + q_last_curr_T *
-        //   t_left_camera_to_pose; q_last_curr_T = q_last_curr_T *
-        //   q_left_camera_to_pose;
+          Eigen::Vector3d observed_1((pt_last.x - c_x) / f_x,
+                                     (pt_last.y - c_y) / f_y, 1);
+          Eigen::Vector3d observed_2((pt_curr.x - c_x) / f_x,
+                                     (pt_curr.y - c_y) / f_y, 1);
+          Eigen::Quaterniond q_last_curr_T = q_last_curr;
+          Eigen::Vector3d t_last_curr_T = t_last_curr;
+          t_last_curr_T =
+              t_pose_to_left_camera + q_pose_to_left_camera * t_last_curr_T;
+          q_last_curr_T = q_pose_to_left_camera * q_last_curr_T;
+          t_last_curr_T = t_last_curr_T + q_last_curr_T * t_left_camera_to_pose;
+          q_last_curr_T = q_last_curr_T * q_left_camera_to_pose;
 
-        //   observed_2 = t_last_curr_T + q_last_curr_T * observed_2;
+          observed_2 = t_last_curr_T + q_last_curr_T * observed_2;
 
-        //   double temp3 = observed_1.cross(observed_2).norm();
+          double temp3 = observed_1.cross(observed_2).norm();
 
-        //   //防止优化公式分母为零
-        //   if (temp3 == 0) continue;
+          //防止优化公式分母为零
+          if (temp3 == 0) continue;
 
-        //   ceres::CostFunction *cost_function = ReprojectionError2::Create(
-        //       pt_last.x, pt_last.y, pt_curr.x, pt_curr.y, left_camera_matrix,
-        //       t_left_camera_to_pose, q_left_camera_to_pose);
-        //   problem.AddResidualBlock(cost_function, loss_function2,
-        //                            q_last_curr.coeffs().data(),
-        //                            t_last_curr.data());
-        //   left_camera_correspondence++;
-        // }
+          ceres::CostFunction *cost_function = ReprojectionError2::Create(
+              pt_last.x, pt_last.y, pt_curr.x, pt_curr.y, left_camera_matrix,
+              t_left_camera_to_pose, q_left_camera_to_pose);
+          problem.AddResidualBlock(cost_function, loss_function2,
+                                   q_last_curr.coeffs().data(),
+                                   t_last_curr.data());
+          left_camera_correspondence++;
+        }
 
         int right_camera_correspondence = 0;
-        // for (size_t i = 0; i < matches_right.size(); ++i) {
-        //   auto pt_curr = imgPoints_right_curr[matches_right[i].queryIdx];
-        //   auto pt_last = imgPoints_right_last[matches_right[i].trainIdx];
+        for (size_t i = 0; i < matches_right.size(); ++i) {
+          auto pt_curr = imgPoints_right_curr[matches_right[i].queryIdx];
+          auto pt_last = imgPoints_right_last[matches_right[i].trainIdx];
 
-        //   double f_x = right_camera_matrix(0, 0);
-        //   double f_y = right_camera_matrix(1, 1);
-        //   double c_x = right_camera_matrix(0, 2);
-        //   double c_y = right_camera_matrix(1, 2);
+          double f_x = right_camera_matrix(0, 0);
+          double f_y = right_camera_matrix(1, 1);
+          double c_x = right_camera_matrix(0, 2);
+          double c_y = right_camera_matrix(1, 2);
 
-        //   Eigen::Vector3d observed_1((pt_last.x - c_x) / f_x,
-        //                              (pt_last.y - c_y) / f_y, 1);
-        //   Eigen::Vector3d observed_2((pt_curr.x - c_x) / f_x,
-        //                              (pt_curr.y - c_y) / f_y, 1);
-        //   Eigen::Quaterniond q_last_curr_T = q_last_curr;
-        //   Eigen::Vector3d t_last_curr_T = t_last_curr;
-        //   t_last_curr_T =
-        //       t_pose_to_right_camera + q_pose_to_right_camera *
-        //       t_last_curr_T;
-        //   q_last_curr_T = q_pose_to_right_camera * q_last_curr_T;
-        //   t_last_curr_T =
-        //       t_last_curr_T + q_last_curr_T * t_right_camera_to_pose;
-        //   q_last_curr_T = q_last_curr_T * q_right_camera_to_pose;
+          Eigen::Vector3d observed_1((pt_last.x - c_x) / f_x,
+                                     (pt_last.y - c_y) / f_y, 1);
+          Eigen::Vector3d observed_2((pt_curr.x - c_x) / f_x,
+                                     (pt_curr.y - c_y) / f_y, 1);
+          Eigen::Quaterniond q_last_curr_T = q_last_curr;
+          Eigen::Vector3d t_last_curr_T = t_last_curr;
+          t_last_curr_T =
+              t_pose_to_right_camera + q_pose_to_right_camera * t_last_curr_T;
+          q_last_curr_T = q_pose_to_right_camera * q_last_curr_T;
+          t_last_curr_T =
+              t_last_curr_T + q_last_curr_T * t_right_camera_to_pose;
+          q_last_curr_T = q_last_curr_T * q_right_camera_to_pose;
 
-        //   observed_2 = t_last_curr_T + q_last_curr_T * observed_2;
+          observed_2 = t_last_curr_T + q_last_curr_T * observed_2;
 
-        //   double temp3 = observed_1.cross(observed_2).norm();
+          double temp3 = observed_1.cross(observed_2).norm();
 
-        //   //防止优化公式分母为零
-        //   if (temp3 == 0) continue;
+          //防止优化公式分母为零
+          if (temp3 == 0) continue;
 
-        //   ceres::CostFunction *cost_function = ReprojectionError2::Create(
-        //       pt_last.x, pt_last.y, pt_curr.x, pt_curr.y,
-        //       right_camera_matrix, t_right_camera_to_pose,
-        //       q_right_camera_to_pose);
-        //   problem.AddResidualBlock(cost_function, loss_function2,
-        //                            q_last_curr.coeffs().data(),
-        //                            t_last_curr.data());
-        //   right_camera_correspondence++;
-        // }
+          ceres::CostFunction *cost_function = ReprojectionError2::Create(
+              pt_last.x, pt_last.y, pt_curr.x, pt_curr.y, right_camera_matrix,
+              t_right_camera_to_pose, q_right_camera_to_pose);
+          problem.AddResidualBlock(cost_function, loss_function2,
+                                   q_last_curr.coeffs().data(),
+                                   t_last_curr.data());
+          right_camera_correspondence++;
+        }
 
         static Accumulator<float> distance_threshold(25);
         float DISTANCE_SQ_THRESHOLD = distance_threshold.mean() * lidar_rate;
@@ -1482,7 +1484,7 @@ void mappingThread() {
     static auto end_time = std::chrono::high_resolution_clock::now();
     static std::chrono::duration<double, std::milli> elapsed_duration =
         end_time - start_time;
-    std::this_thread::sleep_for(elapsed_duration * 10);
+    std::this_thread::sleep_for(elapsed_duration / 10);
 
     //-- 第1步：判断是否有新消息
     mapping_thread_mutex.lock();
@@ -1510,11 +1512,14 @@ void mappingThread() {
     Eigen::Quaterniond q_map_curr = q_map_odom * q_odom_curr_new;
     Eigen::Vector3d t_map_curr = q_map_odom * t_odom_curr_new + t_map_odom;
 
+    static Eigen::Quaterniond q_identity(1, 0, 0, 0);
+    static Eigen::Vector3d t_identity(0, 0, 0);
+
     static Eigen::Quaterniond q_lidar_to_pose(0.5, 0.5, -0.5, 0.5);
     static Eigen::Vector3d t_lidar_to_pose(0., -0.08, -0.27);
     static Eigen::Quaterniond q_pose_to_lidar = q_lidar_to_pose.inverse();
     static Eigen::Vector3d t_pose_to_lidar =
-        Eigen::Vector3d::Identity() - q_pose_to_lidar * t_lidar_to_pose;
+        t_identity - q_pose_to_lidar * t_lidar_to_pose;
 
     static pcl::PointCloud<PointType>::Ptr laserCloudCornerFromMap(
         new pcl::PointCloud<PointType>());
@@ -1569,17 +1574,20 @@ void mappingThread() {
         std::vector<int> pointSearchInd;
         std::vector<float> pointSearchSqDis;
 
-        static Accumulator<float> distance_threshold(1);
-        float DISTANCE_SQ_THRESHOLD = distance_threshold.mean();
-        printf("DISTANCE_SQ_THRESHOLD = %f\n", DISTANCE_SQ_THRESHOLD);
+        static Accumulator<float> distance_threshold(0.7f);
+        float DISTANCE_SQ_THRESHOLD = 0.7f;  // distance_threshold.mean();
+        printf("distance_threshold.mean() = %f\n", distance_threshold.mean());
 
         static Accumulator<float> eigenvalue_rate_threshold(3);
-        float EIGENVALUE_RATE_THRESHOLD = eigenvalue_rate_threshold.mean();
-        printf("EIGENVALUE_RATE_THRESHOLD = %f\n", EIGENVALUE_RATE_THRESHOLD);
+        float EIGENVALUE_RATE_THRESHOLD =
+            3.f;  // eigenvalue_rate_threshold.mean();
+        printf("eigenvalue_rate_threshold.mean() = %f\n",
+               eigenvalue_rate_threshold.mean());
 
-        static Accumulator<float> surf_valid_threshold(0.2);
-        float SURF_VALID_THRESHOLD = surf_valid_threshold.mean();
-        printf("SURF_VALID_THRESHOLD = %f\n", SURF_VALID_THRESHOLD);
+        static Accumulator<float> surf_valid_threshold(0.002);
+        float SURF_VALID_THRESHOLD = 0.002f;  // surf_valid_threshold.mean();
+        printf("surf_valid_threshold.mean() = %f\n",
+               surf_valid_threshold.mean());
 
         //添加边缘约束
         int laserCloudCornerNum = laserCloudCorner.points.size();
@@ -1750,19 +1758,19 @@ void mappingThread() {
     downSizeFilter.setInputCloud(laserCloudSurfFromReadyMap);
     downSizeFilter.filter(*laserCloudSurfFromReadyMap);
 
+    sensor_msgs::PointCloud2 laserCloudOutput;
+    pcl::toROSMsg(*laserCloudCornerFromMap, laserCloudOutput);
+    laserCloudOutput.header.stamp = ros::Time::now();
+    laserCloudOutput.header.frame_id = "kitti_map_velo_link";
+    pubLaserCloudCornerFromMap.publish(laserCloudOutput);
+
+    pcl::toROSMsg(*laserCloudSurfFromMap, laserCloudOutput);
+    laserCloudOutput.header.stamp = ros::Time::now();
+    laserCloudOutput.header.frame_id = "kitti_map_velo_link";
+    pubLaserCloudSurfFromMap.publish(laserCloudOutput);
+
     //-- 第X+1步：创建新的子地图
     if (laserCloudFromMap_count >= 20) {
-      sensor_msgs::PointCloud2 laserCloudOutput;
-      pcl::toROSMsg(*laserCloudCornerFromMap, laserCloudOutput);
-      laserCloudOutput.header.stamp = ros::Time::now();
-      laserCloudOutput.header.frame_id = "kitti_map_link";
-      pubLaserCloudCornerFromMap.publish(laserCloudOutput);
-
-      pcl::toROSMsg(*laserCloudSurfFromMap, laserCloudOutput);
-      laserCloudOutput.header.stamp = ros::Time::now();
-      laserCloudOutput.header.frame_id = "kitti_map_link";
-      pubLaserCloudSurfFromMap.publish(laserCloudOutput);
-
       //传递参数
       // laserCloudCornerFromMap
       // laserCloudSurfFromMap
@@ -1905,7 +1913,7 @@ int main(int argc, char **argv) {
 
   std::thread preprocess_thread{preprocessThread};
   std::thread odometry_thread{odometryThread};
-  // std::thread mapping_thread{mappingThread};
+  std::thread mapping_thread{mappingThread};
 
   ros::spin();
 
