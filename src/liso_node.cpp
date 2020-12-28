@@ -107,6 +107,8 @@ static bool is_odometry_thread_ready;
 //建图线程的缓存变量
 static pcl::PointCloud<PointType> laserCloudCorner_buf;
 static pcl::PointCloud<PointType> laserCloudSurf_buf;
+static pcl::PointCloud<PointType> laserCloudCornerQuery_buf;
+static pcl::PointCloud<PointType> laserCloudSurfQuery_buf;
 static Eigen::Quaterniond q_odom_curr_buf;
 static Eigen::Vector3d t_odom_curr_buf;
 static std::mutex mapping_thread_mutex;
@@ -227,12 +229,13 @@ void robustMatch2(const cv::Mat &queryDescriptors,
   matcher->match(queryDescriptors, trainDescriptors, matches_1);
 
   static Accumulator<float> matcher_distances(30);
+  float MATCHER_DISTANCE_THRESHOLD = matcher_distances.mean() * filer_rate;
+  // printf("matcher_distances.mean = %f\n", matcher_distances.mean());
   for (int i = 0; i < (int)matches_1.size(); i++) {
     matcher_distances.addDataValue(matches_1[i].distance);
-    if (matches_1[i].distance < matcher_distances.mean() * filer_rate)
+    if (matches_1[i].distance < MATCHER_DISTANCE_THRESHOLD)
       matches.push_back(matches_1[i]);
   }
-  // printf("matcher_distances.mean = %f\n", matcher_distances.mean());
 }
 
 //去除指定半径内的点
@@ -824,8 +827,7 @@ void preprocessThread() {
     //-- 第11步：消除无意义点和距离为零的点
     std::vector<int> indices;
     pcl::removeNaNFromPointCloud(*laserCloudIn, *laserCloudIn, indices);
-    removeClosedPointCloud(*laserCloudIn, *laserCloudIn, 2 * RES_RANGE,
-                           0.5 * MAX_RANGE);
+    removeClosedPointCloud(*laserCloudIn, *laserCloudIn, RES_RANGE, MAX_RANGE);
 
     //-- 第12步：计算点云每条线的曲率
     float startOri, endOri;
@@ -1159,6 +1161,7 @@ void odometryThread() {
 
         static Accumulator<float> distance_threshold(25);
         float DISTANCE_SQ_THRESHOLD = distance_threshold.mean() * lidar_rate;
+        // printf("distance_threshold.mean = %f\n", distance_threshold.mean());
 
         // 建立边缘特征约束
         int cornerPointsSharpNum = cornerPointsSharp_curr.points.size();
@@ -1409,7 +1412,6 @@ void odometryThread() {
         visual_num += left_camera_correspondence + right_camera_correspondence;
         lidar_num += corner_correspondence + plane_correspondence;
 
-        // printf("distance_threshold.mean = %f\n", distance_threshold.mean());
         if ((corner_correspondence + plane_correspondence) < 10)
           printf(
               "LESS LIDAR "
@@ -1463,6 +1465,8 @@ void odometryThread() {
     mapping_thread_mutex.lock();
     laserCloudCorner_buf = cornerPointsLessSharp_curr;
     laserCloudSurf_buf = surfPointsLessFlat_curr;
+    laserCloudCornerQuery_buf = cornerPointsSharp_curr;
+    laserCloudSurfQuery_buf = surfPointsFlat_curr;
     q_odom_curr_buf = q_w_curr;
     t_odom_curr_buf = t_w_curr;
     is_mapping_thread_ready = true;
@@ -1501,6 +1505,9 @@ void mappingThread() {
     mapping_thread_mutex.lock();
     pcl::PointCloud<PointType> laserCloudCorner = laserCloudCorner_buf;
     pcl::PointCloud<PointType> laserCloudSurf = laserCloudSurf_buf;
+    pcl::PointCloud<PointType> laserCloudCornerQuery =
+        laserCloudCornerQuery_buf;
+    pcl::PointCloud<PointType> laserCloudSurfQuery = laserCloudSurfQuery_buf;
     Eigen::Quaterniond q_odom_curr_new = q_odom_curr_buf;
     Eigen::Vector3d t_odom_curr_new = t_odom_curr_buf;
     is_mapping_thread_ready = false;
@@ -1536,6 +1543,14 @@ void mappingThread() {
     static int laserCloudFromReadyMap_count = 0;
     static Eigen::Quaterniond q_map_initReadyMap(q_map_curr);
     static Eigen::Vector3d t_map_initReadyMap(t_map_curr);
+
+    static float lidar_rate = 1;
+    static float corner_rate = 1;
+    static float surf_rate = 1;
+    printf("lidar_rate = %f, corner_rate = %f, surf_rate = %f\n", lidar_rate,
+           corner_rate, surf_rate);
+    int corner_num = 0;
+    int surf_num = 0;
 
     //-- 第4步：判断是否初始化
     static bool is_mapping_thread_init = false;
@@ -1575,26 +1590,27 @@ void mappingThread() {
         std::vector<float> pointSearchSqDis;
 
         static Accumulator<float> distance_threshold(0.7f);
-        float DISTANCE_SQ_THRESHOLD = 0.7f;  // distance_threshold.mean();
+        float DISTANCE_SQ_THRESHOLD = distance_threshold.mean() * lidar_rate;
         printf("distance_threshold.mean() = %f\n", distance_threshold.mean());
 
         static Accumulator<float> eigenvalue_rate_threshold(3);
         float EIGENVALUE_RATE_THRESHOLD =
-            3.f;  // eigenvalue_rate_threshold.mean();
+            eigenvalue_rate_threshold.mean() /
+            corner_rate;  //数值越大，限制越严格，因此用除法
         printf("eigenvalue_rate_threshold.mean() = %f\n",
                eigenvalue_rate_threshold.mean());
 
         static Accumulator<float> surf_valid_threshold(0.002);
-        float SURF_VALID_THRESHOLD = 0.002f;  // surf_valid_threshold.mean();
+        float SURF_VALID_THRESHOLD = surf_valid_threshold.mean() * surf_rate;
         printf("surf_valid_threshold.mean() = %f\n",
                surf_valid_threshold.mean());
 
         //添加边缘约束
-        int laserCloudCornerNum = laserCloudCorner.points.size();
+        int laserCloudCornerQueryNum = laserCloudCornerQuery.points.size();
         int corner_correspondence = 0;
-        for (int i = 0; i < laserCloudCornerNum; ++i) {
-          TransformToStart(&(laserCloudCorner.points[i]), &pointSel, q_temp,
-                           t_temp);
+        for (int i = 0; i < laserCloudCornerQueryNum; ++i) {
+          TransformToStart(&(laserCloudCornerQuery.points[i]), &pointSel,
+                           q_temp, t_temp);
           kdtreeCornerFromMap->nearestKSearch(pointSel, 5, pointSearchInd,
                                               pointSearchSqDis);
 
@@ -1623,17 +1639,18 @@ void mappingThread() {
             //特征值分解，该特征矢量要足够显著才能认定为是直线
             Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> saes(covMat);
             Eigen::Vector3d unit_direction = saes.eigenvectors().col(2);
+            // std::cout << "eigenvalues = " << saes.eigenvalues() << std::endl;
             double eigenvalue_rate =
                 saes.eigenvalues()[2] / saes.eigenvalues()[1];
-            eigenvalue_rate_threshold.addDataValue(pointSearchSqDis[4]);
+            eigenvalue_rate_threshold.addDataValue(eigenvalue_rate);
             if (eigenvalue_rate > EIGENVALUE_RATE_THRESHOLD) {
               Eigen::Vector3d point_on_line = center;
               Eigen::Vector3d point_a, point_b;
               point_a = 0.1 * unit_direction + point_on_line;
               point_b = -0.1 * unit_direction + point_on_line;
-              Eigen::Vector3d curr_point(laserCloudCorner.points[i].x,
-                                         laserCloudCorner.points[i].y,
-                                         laserCloudCorner.points[i].z);
+              Eigen::Vector3d curr_point(laserCloudCornerQuery.points[i].x,
+                                         laserCloudCornerQuery.points[i].y,
+                                         laserCloudCornerQuery.points[i].z);
               ceres::CostFunction *cost_function =
                   LidarEdgeFactor2::Create(curr_point, point_a, point_b, 1.0,
                                            t_lidar_to_pose, q_lidar_to_pose);
@@ -1646,10 +1663,10 @@ void mappingThread() {
         }
 
         //添加边缘约束
-        int laserCloudSurfNum = laserCloudSurf.points.size();
+        int laserCloudSurfQueryNum = laserCloudSurfQuery.points.size();
         int surf_correspondence = 0;
-        for (int i = 0; i < laserCloudSurfNum; ++i) {
-          TransformToStart(&(laserCloudSurf.points[i]), &pointSel, q_temp,
+        for (int i = 0; i < laserCloudSurfQueryNum; ++i) {
+          TransformToStart(&(laserCloudSurfQuery.points[i]), &pointSel, q_temp,
                            t_temp);
           kdtreeSurfFromMap->nearestKSearch(pointSel, 5, pointSearchInd,
                                             pointSearchSqDis);
@@ -1685,9 +1702,9 @@ void mappingThread() {
             }
 
             if (planeValid) {
-              Eigen::Vector3d curr_point(laserCloudSurf.points[i].x,
-                                         laserCloudSurf.points[i].y,
-                                         laserCloudSurf.points[i].z);
+              Eigen::Vector3d curr_point(laserCloudSurfQuery.points[i].x,
+                                         laserCloudSurfQuery.points[i].y,
+                                         laserCloudSurfQuery.points[i].z);
               ceres::CostFunction *cost_function =
                   LidarPlaneNormFactor2::Create(
                       curr_point, norm, negative_OA_dot_norm, t_temp, q_temp);
@@ -1701,6 +1718,9 @@ void mappingThread() {
 
         printf("coner_correspondance = %d, surf_correspondence = %d\n",
                corner_correspondence, surf_correspondence);
+
+        corner_num += corner_correspondence;
+        surf_num += surf_correspondence;
 
         if ((corner_correspondence + surf_correspondence) < 10)
           printf(
@@ -1795,6 +1815,25 @@ void mappingThread() {
     end_time = std::chrono::high_resolution_clock::now();
     elapsed_duration = end_time - start_time;
     ROS_INFO("mappingThread End, cost time %f ms.\n", elapsed_duration.count());
+
+    double cost_time = elapsed_duration.count();
+    double sum_num = corner_num + surf_num;
+    double corner_rate_diff = corner_num / sum_num;
+    double surf_rate_diff = surf_num / sum_num;
+    if (sum_num > 0) {
+      if (cost_time > 450) {
+        lidar_rate = lidar_rate * (1. - 0.1);
+        corner_rate = corner_rate * (1. - 0.1 * corner_rate_diff);
+        surf_rate = surf_rate * (1. - 0.1 * surf_rate_diff);
+      } else if (cost_time < 350) {
+        lidar_rate = lidar_rate * (1. + 0.1);
+        corner_rate = corner_rate * (1. + 0.1 * corner_rate_diff);
+        surf_rate = surf_rate * (1. + 0.1 * surf_rate_diff);
+        lidar_rate = lidar_rate > 1 ? 1 : lidar_rate;
+        // corner_rate = corner_rate > 1 ? 1 : corner_rate;
+        // surf_rate = surf_rate > 1 ? 1 : lidar_rate;
+      }
+    }
   }
 }
 
@@ -1913,7 +1952,7 @@ int main(int argc, char **argv) {
 
   std::thread preprocess_thread{preprocessThread};
   std::thread odometry_thread{odometryThread};
-  std::thread mapping_thread{mappingThread};
+  // std::thread mapping_thread{mappingThread};
 
   ros::spin();
 
