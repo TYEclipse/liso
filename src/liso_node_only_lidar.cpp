@@ -51,7 +51,6 @@ static float RES_ANGLE = 2;
 
 //话题
 static ros::Publisher pubLeftImageWithFeature;
-static ros::Publisher pubLeftImageWithFeatureRight;
 static ros::Publisher pubPointCloudWithFeature;
 static ros::Publisher pubCornerPointsSharp;
 static ros::Publisher pubCornerPointsLessSharp;
@@ -65,8 +64,7 @@ static cv::Ptr<cv::FeatureDetector> detector;
 static cv::Ptr<cv::DescriptorExtractor> descriptor;
 
 //相机参数
-static double stereoDistanceThresh_max;
-static double stereoDistanceThresh_min;
+static double stereoDistanceThresh;
 static cv::Mat left_camera_to_base_pose;
 static cv::Mat right_camera_to_base_pose;
 static cv::Mat lidar_to_base_pose;
@@ -115,15 +113,12 @@ static std::mutex mapping_thread_mutex;
 static bool is_mapping_thread_ready;
 
 static std::fstream outputFile;
-static std::fstream costtimeFile;
-static std::fstream poseFile;
 
 inline cv::Scalar get_color(float depth) {
   static Accumulator<float> depth_range(50);
   if (depth < 4 * depth_range.mean() && depth > -2 * depth_range.mean())
     depth_range.addDataValue(depth);
-  float up_th = stereoDistanceThresh_max, low_th = stereoDistanceThresh_min,
-        th_range = up_th - low_th;
+  float up_th = 2 * depth_range.mean(), low_th = 0.f, th_range = up_th - low_th;
   if (depth > up_th) depth = up_th;
   if (depth < low_th) depth = low_th;
   // printf("depth_range.mean() = %f\n", depth_range.mean());
@@ -185,7 +180,7 @@ void filterUsableKeyPoints(
     std::vector<cv::Point3d> &good_points_3d) {
   for (size_t i = 0; i < matches.size(); i++) {
     double depth = points_3d[i].z;
-    if (depth < stereoDistanceThresh_max && depth > stereoDistanceThresh_min) {
+    if (depth < stereoDistanceThresh && depth > 0.54) {
       int query_idx = matches[i].queryIdx;
       int train_idx = matches[i].trainIdx;
       descriptors_left.push_back(descriptors_1.row(query_idx));
@@ -234,10 +229,10 @@ void robustMatch2(const cv::Mat &queryDescriptors,
   matcher->match(queryDescriptors, trainDescriptors, matches_1);
 
   static Accumulator<float> matcher_distances(30);
-  float threshold = matcher_distances.mean();
   for (int i = 0; i < (int)matches_1.size(); i++) {
     matcher_distances.addDataValue(matches_1[i].distance);
-    if (matches_1[i].distance < threshold) matches.push_back(matches_1[i]);
+    if (matches_1[i].distance < matcher_distances.mean() * filer_rate)
+      matches.push_back(matches_1[i]);
   }
   // printf("matcher_distances.mean = %f\n", matcher_distances.mean());
 }
@@ -488,19 +483,16 @@ void segmentSurfAndConner(
     sharp_thresh *= 0.9;
   else if (numLessSharp / numSharp < 4.5)
     sharp_thresh *= 1.1;
-  if (numLessFlat / numLessSharp > 1.1)
+  if (numLessFlat / numLessSharp > 2.2)
     mid_thresh *= 0.9;
-  else if (numLessFlat / numLessSharp < 0.9)
+  else if (numLessFlat / numLessSharp < 1.8)
     mid_thresh *= 1.1;
   if (numLessFlat / numFlat > 5.5)
     flat_thresh *= 1.1;
   else if (numLessFlat / numFlat < 4.5)
     flat_thresh *= 0.9;
-  // std::cout << "( " << sharp_thresh << " , " << mid_thresh << " , "
-  //           << flat_thresh << " )" << std::endl;
-  outputFile << sharp_thresh << " " << mid_thresh << " " << flat_thresh << " "
-             << numSharp << " " << numLessSharp << " " << numLessFlat << " "
-             << numFlat << std::endl;
+  // std::cout << "( " << sharp_thresh << " , " << mid_thresh << " , " <<
+  // flat_thresh << " )" << std::endl;
 }
 
 // 把点转环到上一帧的坐标系上
@@ -601,8 +593,7 @@ void addMatchPointToViews(const std::vector<cv::Point2f> &points_1,
                        (cv::Mat_<double>(4, 1) << point.x, point.y, point.z, 1);
     double depth = pt_trans.at<double>(2, 0);
 
-    if (depth > stereoDistanceThresh_max || depth < stereoDistanceThresh_min)
-      continue;
+    if (depth > stereoDistanceThresh || depth < 0.54) continue;
 
     if (points_1[i].x >= image_size.x || points_1[i].y >= image_size.y ||
         points_1[i].x <= 1 || points_1[i].y <= 1)
@@ -863,24 +854,11 @@ void preprocessThread() {
     is_odometry_thread_ready = true;
     odometry_thread_mutex.unlock();
 
-    // for (int i = 0; i < keypoints_1.size(); i++) {
-    //   cv::circle(img_plot.image, keypoints_1[i].pt, 2, cv::Scalar(0, 0, 255),
-    //              2);
-    // }
-
-    // cv_bridge::CvImage img_plot = cv_ptr_1;
-    // cv::drawMatches(cv_ptr_1.image, keypoints_1, cv_ptr_2.image, keypoints_2,
-    //                 good_matches_stereo, img_plot.image);
-    // // for (int i = 0; i < imgPoints_left.size(); i++)
-    // //   cv::circle(img_plot.image, imgPoints_left[i], 2,
-    // //              get_color(good_points_3d[i].z), 2);
-    // pubLeftImageWithFeature.publish(img_plot.toImageMsg());
-
-    // cv_bridge::CvImage img_plot2 = cv_ptr_2;
-    // for (int i = 0; i < imgPoints_right.size(); i++)
-    //   cv::circle(img_plot2.image, imgPoints_right[i], 2,
-    //              get_color(good_points_3d[i].z), 2);
-    // pubLeftImageWithFeatureRight.publish(img_plot2.toImageMsg());
+    cv_bridge::CvImage img_plot = cv_ptr_1;
+    for (int i = 0; i < imgPoints_left.size(); i++)
+      cv::circle(img_plot.image, imgPoints_left[i], 2,
+                 get_color(good_points_3d[i].z), 2);
+    pubLeftImageWithFeature.publish(img_plot.toImageMsg());
 
     pcl::PointCloud<PointType>::Ptr points_3d_clouds(
         new pcl::PointCloud<PointType>);
@@ -929,7 +907,7 @@ void updateFilterRate(float &visual_rate, float &lidar_rate,
     if (cost_time > 90) {
       visual_rate = visual_rate * (1. - 0.1 * visual_rate_diff);
       lidar_rate = lidar_rate * (1. - 0.1 * lidar_rate_diff);
-    } else if (cost_time < 70) {
+    } else if (cost_time < 72) {
       visual_rate = visual_rate * (1. + 0.1 * visual_rate_diff);
       lidar_rate = lidar_rate * (1. + 0.1 * lidar_rate_diff);
       visual_rate = visual_rate > 1 ? 1 : visual_rate;
@@ -1028,12 +1006,6 @@ void odometryThread() {
     printf("visual_rate = %f, lidar_rate = %f\n", visual_rate, lidar_rate);
     int visual_num = 0;
     int lidar_num = 0;
-
-    int vl_num = 0;
-    int vr_num = 0;
-    int ls_num = 0;
-    int lf_num = 0;
-    int op_num = 0;
     //-- 第3步：判断是否初始化
     static bool is_odometry_thread_init = false;
     if (!is_odometry_thread_init) {
@@ -1045,13 +1017,11 @@ void odometryThread() {
     } else {
       //-- 第4步：双目视觉匹配
       std::vector<cv::DMatch> matches_left;
+      robustMatch2(descriptors_left_curr, descriptors_left_last, matches_left,
+                   visual_rate);
       std::vector<cv::DMatch> matches_right;
-      if (imgPoints_left_curr.size() > 0 && imgPoints_left_last.size() > 0)
-        robustMatch2(descriptors_left_curr, descriptors_left_last, matches_left,
-                     visual_rate);
-      if (imgPoints_right_curr.size() > 0 && imgPoints_right_last.size() > 0)
-        robustMatch2(descriptors_right_curr, descriptors_right_last,
-                     matches_right, visual_rate);
+      robustMatch2(descriptors_right_curr, descriptors_right_last,
+                   matches_right, visual_rate);
 
       printf("good_matches_stereo_curr = %d, good_matches_stereo_last =%d\n",
              int(good_matches_stereo_curr.size()),
@@ -1125,12 +1095,12 @@ void odometryThread() {
           //防止优化公式分母为零
           if (temp3 == 0) continue;
 
-          ceres::CostFunction *cost_function = ReprojectionError2::Create(
-              pt_last.x, pt_last.y, pt_curr.x, pt_curr.y, left_camera_matrix,
-              t_left_camera_to_pose, q_left_camera_to_pose);
-          problem.AddResidualBlock(cost_function, loss_function2,
-                                   q_last_curr.coeffs().data(),
-                                   t_last_curr.data());
+          // ceres::CostFunction *cost_function = ReprojectionError2::Create(
+          //     pt_last.x, pt_last.y, pt_curr.x, pt_curr.y, left_camera_matrix,
+          //     t_left_camera_to_pose, q_left_camera_to_pose);
+          // problem.AddResidualBlock(cost_function, loss_function2,
+          //                          q_last_curr.coeffs().data(),
+          //                          t_last_curr.data());
           left_camera_correspondence++;
         }
 
@@ -1164,12 +1134,13 @@ void odometryThread() {
           //防止优化公式分母为零
           if (temp3 == 0) continue;
 
-          ceres::CostFunction *cost_function = ReprojectionError2::Create(
-              pt_last.x, pt_last.y, pt_curr.x, pt_curr.y, right_camera_matrix,
-              t_right_camera_to_pose, q_right_camera_to_pose);
-          problem.AddResidualBlock(cost_function, loss_function2,
-                                   q_last_curr.coeffs().data(),
-                                   t_last_curr.data());
+          // ceres::CostFunction *cost_function = ReprojectionError2::Create(
+          //     pt_last.x, pt_last.y, pt_curr.x, pt_curr.y,
+          //     right_camera_matrix, t_right_camera_to_pose,
+          //     q_right_camera_to_pose);
+          // problem.AddResidualBlock(cost_function, loss_function2,
+          //                          q_last_curr.coeffs().data(),
+          //                          t_last_curr.data());
           right_camera_correspondence++;
         }
 
@@ -1424,11 +1395,6 @@ void odometryThread() {
             corner_correspondence, plane_correspondence);
         visual_num += left_camera_correspondence + right_camera_correspondence;
         lidar_num += corner_correspondence + plane_correspondence;
-        vl_num += left_camera_correspondence;
-        vr_num += right_camera_correspondence;
-        ls_num += corner_correspondence;
-        lf_num += plane_correspondence;
-        op_num += 1;
 
         // printf("distance_threshold.mean = %f\n", distance_threshold.mean());
         if ((corner_correspondence + plane_correspondence) < 10)
@@ -1474,10 +1440,10 @@ void odometryThread() {
     T.rotate(q_w_curr);
     T.pretranslate(t_w_curr);
     Eigen::Matrix4d M = T.matrix();
-    poseFile << M(0, 0) << " " << M(0, 1) << " " << M(0, 2) << " " << M(0, 3)
-             << " " << M(1, 0) << " " << M(1, 1) << " " << M(1, 2) << " "
-             << M(1, 3) << " " << M(2, 0) << " " << M(2, 1) << " " << M(2, 2)
-             << " " << M(2, 3) << std::endl;
+    outputFile << M(0, 0) << " " << M(0, 1) << " " << M(0, 2) << " " << M(0, 3)
+               << " " << M(1, 0) << " " << M(1, 1) << " " << M(1, 2) << " "
+               << M(1, 3) << " " << M(2, 0) << " " << M(2, 1) << " " << M(2, 2)
+               << " " << M(2, 3) << std::endl;
 
     descriptors_left_last = descriptors_left_curr;
     descriptors_right_last = descriptors_right_curr;
@@ -1501,9 +1467,6 @@ void odometryThread() {
     ROS_INFO("odometryThread End, cost time %f ms.\n", cost_time);
 
     updateFilterRate(visual_rate, lidar_rate, visual_num, lidar_num, cost_time);
-
-    costtimeFile << cost_time << " " << vl_num << " " << vr_num << " " << ls_num
-                 << " " << lf_num << " " << op_num << std::endl;
   }
 }
 
@@ -1549,7 +1512,6 @@ int main(int argc, char **argv) {
                         "/kitti/velo/pointcloud");
 
   std::string left_image_with_feature_pub;
-  std::string left_image_with_feature_right_pub;
   std::string point_cloud_with_feature_pub;
   std::string conner_points_pub;
   std::string conner_points_less_pub;
@@ -1560,9 +1522,6 @@ int main(int argc, char **argv) {
   nh.param<std::string>("left_image_with_feature_pub",
                         left_image_with_feature_pub,
                         "/left_image_with_feature_pub");
-  nh.param<std::string>("left_image_with_feature_right_pub",
-                        left_image_with_feature_right_pub,
-                        "/left_image_with_feature_right_pub");
   nh.param<std::string>("point_cloud_with_feature_pub",
                         point_cloud_with_feature_pub,
                         "/point_cloud_with_feature_pub");
@@ -1604,8 +1563,6 @@ int main(int argc, char **argv) {
   // 发布话题
   pubLeftImageWithFeature =
       nh.advertise<sensor_msgs::Image>(left_image_with_feature_pub, 10);
-  pubLeftImageWithFeatureRight =
-      nh.advertise<sensor_msgs::Image>(left_image_with_feature_right_pub, 10);
   pubPointCloudWithFeature =
       nh.advertise<sensor_msgs::PointCloud2>(point_cloud_with_feature_pub, 10);
   pubCornerPointsSharp =
@@ -1630,8 +1587,7 @@ int main(int argc, char **argv) {
   lidar_to_base_pose =
       (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
 
-  stereoDistanceThresh_max = sqrt(718.856 * 0.54 / 0.1);
-  stereoDistanceThresh_min = 1.68;
+  stereoDistanceThresh = 718.856 * 0.54 * 2;
 
   detector = cv::ORB::create();
   descriptor = cv::ORB::create();
@@ -1641,14 +1597,10 @@ int main(int argc, char **argv) {
   // std::thread mapping_thread{ mappingThread };
 
   outputFile.open("/home/tyin/output.txt", std::ios::out | std::ios::trunc);
-  costtimeFile.open("/home/tyin/costtime.txt", std::ios::out | std::ios::trunc);
-  poseFile.open("/home/tyin/pose.txt", std::ios::out | std::ios::trunc);
 
   ros::spin();
 
   outputFile.close();
-  costtimeFile.close();
-  poseFile.close();
 
   ROS_INFO("liso Stop\n");
 }
