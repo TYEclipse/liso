@@ -488,9 +488,9 @@ void segmentSurfAndConner(
     sharp_thresh *= 0.9;
   else if (numLessSharp / numSharp < 4.5)
     sharp_thresh *= 1.1;
-  if (numLessFlat / numLessSharp > 1.1)
+  if (numLessFlat / numLessSharp > 2.2)
     mid_thresh *= 0.9;
-  else if (numLessFlat / numLessSharp < 0.9)
+  else if (numLessFlat / numLessSharp < 1.8)
     mid_thresh *= 1.1;
   if (numLessFlat / numFlat > 5.5)
     flat_thresh *= 1.1;

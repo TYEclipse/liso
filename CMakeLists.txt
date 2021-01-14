@@ -40,6 +40,22 @@ target_link_libraries(liso_node
   ${PCL_LIBRARIES}
   )
 
+add_executable(liso_node_only_lidar src/liso_node_only_lidar.cpp)
+target_link_libraries(liso_node_only_lidar
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBS}
+  ${CERES_LIBRARIES}
+  ${PCL_LIBRARIES}
+  )
+
+add_executable(liso_node_mono src/liso_node_mono.cpp)
+target_link_libraries(liso_node_mono
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBS}
+  ${CERES_LIBRARIES}
+  ${PCL_LIBRARIES}
+  )
+
 ## Compile as C++11, supported in ROS Kinetic and newer
 # add_compile_options(-std=c++11)
 
