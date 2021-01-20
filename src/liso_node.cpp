@@ -1277,10 +1277,10 @@ void odometryThread() {
 
         // find correspondence for plane
         // features
-        int surfPointsFlatNum = cornerPointsSharp_curr.points.size();
+        int surfPointsFlatNum = surfPointsFlat_curr.points.size();
         int plane_correspondence = 0;
         for (int i = 0; i < surfPointsFlatNum; ++i) {
-          TransformToStart(&(cornerPointsSharp_curr.points[i]), &pointSel,
+          TransformToStart(&(surfPointsFlat_curr.points[i]), &pointSel,
                            q_temp, t_temp);
           kdtreeSurfLast->nearestKSearch(pointSel, 1, pointSearchInd,
                                          pointSearchSqDis);
@@ -1367,9 +1367,9 @@ void odometryThread() {
             }
 
             if (minPointInd2 >= 0 && minPointInd3 >= 0) {
-              Eigen::Vector3d curr_point(cornerPointsSharp_curr.points[i].x,
-                                         cornerPointsSharp_curr.points[i].y,
-                                         cornerPointsSharp_curr.points[i].z);
+              Eigen::Vector3d curr_point(surfPointsFlat_curr.points[i].x,
+                                         surfPointsFlat_curr.points[i].y,
+                                         surfPointsFlat_curr.points[i].z);
               Eigen::Vector3d last_point_a(
                   surfPointsLessFlat_last.points[closestPointInd].x,
                   surfPointsLessFlat_last.points[closestPointInd].y,
@@ -1385,7 +1385,7 @@ void odometryThread() {
 
               double s;
               if (DISTORTION)
-                s = (cornerPointsSharp_curr.points[i].intensity -
+                s = (surfPointsFlat_curr.points[i].intensity -
                      int(surfPointsLessFlat_last.points[i].intensity)) /
                     SCAN_PERIOD;
               else
