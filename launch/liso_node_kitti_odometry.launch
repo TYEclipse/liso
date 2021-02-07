@@ -1,0 +1,12 @@
+<launch>
+
+<param name="lidar_type" type="string" value="VLP-16" />
+
+<node pkg="liso" type="liso_node" name="liso_node" output="screen" />
+
+<arg name="rviz" default="false" />
+<group if="$(arg rviz)">
+<node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz" args="-d $(find liso)/rviz/rviz1.rviz" />
+</group>
+
+</launch>
