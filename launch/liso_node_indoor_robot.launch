@@ -1,6 +1,6 @@
 <launch>
 
-<param name="lidar_type" type="string" value="VLP-16" />
+<param name="lidar_type" type="string" value="C16-700B" />
 
 <node pkg="liso" type="liso_node" name="liso_node" output="screen" />
 
