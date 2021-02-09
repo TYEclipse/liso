@@ -733,6 +733,25 @@ void parseLidarType(const std::string &lidarType) {
     MAX_ANGLE = 2;
     MIN_ANGLE = -24.8f;
     RES_ANGLE = 0.4f * 2;
+  } else if (lidarType == "C16-700B") {
+    N_SCAN = 16;
+    MAX_RANGE = 70;
+    MIN_RANGE = 0;
+    RES_RANGE = 0.03f * 2;
+    MAX_ANGLE = 15;
+    MIN_ANGLE = -15;
+    RES_ANGLE = 2 * 2;
+  } else {
+    printf("， which is UNRECOGNIZED!!!\n");
+    ROS_BREAK();
+  }
+  printf(".\n");
+}
+
+void parseCameraType(const std::string &cameraType) {
+  printf("Lidar type is %s", cameraType.c_str());
+  if (cameraType == "VLP-16") {
+  } else if (cameraType == "HDL-32E") {
   } else {
     printf("， which is UNRECOGNIZED!!!\n");
     ROS_BREAK();
@@ -1280,8 +1299,8 @@ void odometryThread() {
         int surfPointsFlatNum = surfPointsFlat_curr.points.size();
         int plane_correspondence = 0;
         for (int i = 0; i < surfPointsFlatNum; ++i) {
-          TransformToStart(&(surfPointsFlat_curr.points[i]), &pointSel,
-                           q_temp, t_temp);
+          TransformToStart(&(surfPointsFlat_curr.points[i]), &pointSel, q_temp,
+                           t_temp);
           kdtreeSurfLast->nearestKSearch(pointSel, 1, pointSearchInd,
                                          pointSearchSqDis);
 
@@ -1898,6 +1917,11 @@ int main(int argc, char **argv) {
   std::string lidarType;
   nh.param<std::string>("lidar_type", lidarType, "HDL-64E");
   parseLidarType(lidarType);
+
+  // 雷达参数
+  std::string cameraType;
+  nh.param<std::string>("camera_type", cameraType, "KITTI-Camera");
+  parseCameraType(cameraType);
 
   // 订阅话题
   message_filters::Subscriber<sensor_msgs::Image> subLeftImage(

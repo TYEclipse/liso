@@ -1,0 +1,4 @@
+# 激光雷达型号
+lidar_type: HDL-64E
+
+camera_type: KITTI-Camera
