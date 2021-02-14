@@ -1,4 +1,45 @@
 # 激光雷达型号
 lidar_type: HDL-64E
+n_scan: 64
+max_range: 120.0
+min_range: 0.0
+res_range: 0.04
+max_angle: 2
+min_angle: -24.8
+res_angle: 0.8
 
+  # if (lidarType == "VLP-16") {
+  #   N_SCAN = 16;
+  #   MAX_RANGE = 100;
+  #   MIN_RANGE = 0;
+  #   RES_RANGE = 0.03f * 2;
+  #   MAX_ANGLE = 15;
+  #   MIN_ANGLE = -15;
+  #   RES_ANGLE = 2 * 2;
+  # } else if (lidarType == "HDL-32E") {
+  #   N_SCAN = 32;
+  #   MAX_RANGE = 100;
+  #   MIN_RANGE = 0;
+  #   RES_RANGE = 0.02f * 2;
+  #   MAX_ANGLE = 10.67f;
+  #   MIN_ANGLE = -30.67f;
+  #   RES_ANGLE = 1.33f * 2;
+  # } else if (lidarType == "HDL-64E") {
+  #   N_SCAN = 64;
+  #   MAX_RANGE = 120;
+  #   MIN_RANGE = 0;
+  #   RES_RANGE = 0.02f * 2;
+  #   MAX_ANGLE = 2;
+  #   MIN_ANGLE = -24.8f;
+  #   RES_ANGLE = 0.4f * 2;
+  # } else if (lidarType == "C16-700B") {
+  #   N_SCAN = 16;
+  #   MAX_RANGE = 70;
+  #   MIN_RANGE = 0;
+  #   RES_RANGE = 0.03f * 2;
+  #   MAX_ANGLE = 15;
+  #   MIN_ANGLE = -15;
+  #   RES_ANGLE = 2 * 2;
+
+# 双目相机型号
 camera_type: KITTI-Camera
