@@ -706,59 +706,6 @@ void callbackHandle(const sensor_msgs::ImageConstPtr &left_image_msg,
   ROS_INFO("callbackHandle Stop\n");
 }
 
-// 激光雷达的参数
-void parseLidarType(const std::string &lidarType) {
-  printf("Lidar type is %s", lidarType.c_str());
-  if (lidarType == "VLP-16") {
-    N_SCAN = 16;
-    MAX_RANGE = 100;
-    MIN_RANGE = 0;
-    RES_RANGE = 0.03f * 2;
-    MAX_ANGLE = 15;
-    MIN_ANGLE = -15;
-    RES_ANGLE = 2 * 2;
-  } else if (lidarType == "HDL-32E") {
-    N_SCAN = 32;
-    MAX_RANGE = 100;
-    MIN_RANGE = 0;
-    RES_RANGE = 0.02f * 2;
-    MAX_ANGLE = 10.67f;
-    MIN_ANGLE = -30.67f;
-    RES_ANGLE = 1.33f * 2;
-  } else if (lidarType == "HDL-64E") {
-    N_SCAN = 64;
-    MAX_RANGE = 120;
-    MIN_RANGE = 0;
-    RES_RANGE = 0.02f * 2;
-    MAX_ANGLE = 2;
-    MIN_ANGLE = -24.8f;
-    RES_ANGLE = 0.4f * 2;
-  } else if (lidarType == "C16-700B") {
-    N_SCAN = 16;
-    MAX_RANGE = 70;
-    MIN_RANGE = 0;
-    RES_RANGE = 0.03f * 2;
-    MAX_ANGLE = 15;
-    MIN_ANGLE = -15;
-    RES_ANGLE = 2 * 2;
-  } else {
-    printf("， which is UNRECOGNIZED!!!\n");
-    ROS_BREAK();
-  }
-  printf(".\n");
-}
-
-void parseCameraType(const std::string &cameraType) {
-  printf("Lidar type is %s", cameraType.c_str());
-  if (cameraType == "VLP-16") {
-  } else if (cameraType == "HDL-32E") {
-  } else {
-    printf("， which is UNRECOGNIZED!!!\n");
-    ROS_BREAK();
-  }
-  printf(".\n");
-}
-
 void preprocessThread() __attribute__((noreturn));
 void odometryThread() __attribute__((noreturn));
 void mappingThread() __attribute__((noreturn));
@@ -1879,49 +1826,35 @@ int main(int argc, char **argv) {
   nh.param<std::string>("point_cloud_sub", point_cloud_sub,
                         "/kitti/velo/pointcloud");
 
-  std::string left_image_with_feature_pub;
-  std::string point_cloud_with_feature_pub;
-  std::string conner_points_pub;
-  std::string conner_points_less_pub;
-  std::string surf_points_pub;
-  std::string surf_points_less_pub;
-  std::string laser_odometry_pub;
-  std::string camera_points_clouds_pub;
-  std::string laser_cloud_corner_from_map_pub;
-  std::string laser_cloud_surf_from_map_pub;
-  nh.param<std::string>("left_image_with_feature_pub",
-                        left_image_with_feature_pub,
-                        "/left_image_with_feature_pub");
-  nh.param<std::string>("point_cloud_with_feature_pub",
-                        point_cloud_with_feature_pub,
-                        "/point_cloud_with_feature_pub");
-  nh.param<std::string>("conner_points_pub", conner_points_pub,
-                        "/conner_points_pub");
-  nh.param<std::string>("conner_points_less_pub", conner_points_less_pub,
-                        "/conner_points_less_pub");
-  nh.param<std::string>("surf_points_pub", surf_points_pub, "/surf_points_pub");
-  nh.param<std::string>("surf_points_less_pub", surf_points_less_pub,
-                        "/surf_points_less_pub");
-  nh.param<std::string>("laser_odometry_pub", laser_odometry_pub,
-                        "/laser_odometry_pub");
-  nh.param<std::string>("camera_points_clouds_pub", camera_points_clouds_pub,
-                        "/camera_points_clouds_pub");
-  nh.param<std::string>("laser_cloud_corner_from_map_pub",
-                        laser_cloud_corner_from_map_pub,
-                        "/laser_cloud_corner_from_map_pub");
-  nh.param<std::string>("laser_cloud_surf_from_map_pub",
-                        laser_cloud_surf_from_map_pub,
-                        "/laser_cloud_surf_from_map_pub");
+  std::string left_image_with_feature_pub = "/left_image_with_feature_pub";
+  std::string point_cloud_with_feature_pub = "/point_cloud_with_feature_pub";
+  std::string conner_points_pub = "/conner_points_pub";
+  std::string conner_points_less_pub = "/conner_points_less_pub";
+  std::string surf_points_pub = "/surf_points_pub";
+  std::string surf_points_less_pub = "/surf_points_less_pub";
+  std::string laser_odometry_pub = "/laser_odometry_pub";
+  std::string camera_points_clouds_pub = "/camera_points_clouds_pub";
+  std::string laser_cloud_corner_from_map_pub =
+      "/laser_cloud_corner_from_map_pub";
+  std::string laser_cloud_surf_from_map_pub = "/laser_cloud_surf_from_map_pub";
 
   // 雷达参数
   std::string lidarType;
   nh.param<std::string>("lidar_type", lidarType, "HDL-64E");
-  parseLidarType(lidarType);
+  nh.param<int>("n_scan", N_SCAN, 64);
+  nh.param<float>("max_range", MAX_RANGE, 120.0);
+  nh.param<float>("min_range", MIN_RANGE, 0.0);
+  nh.param<float>("res_range", RES_RANGE, 0.04);
+  nh.param<float>("max_angle", MAX_ANGLE, 2);
+  nh.param<float>("min_angle", MIN_ANGLE, -24.8);
+  nh.param<float>("res_angle", RES_ANGLE, 0.8);
+  printf("%s has %d scans， range [%f,%f]:%f,angle [%f,%f]:%f",
+         lidarType.c_str(), N_SCAN, MAX_RANGE, MIN_RANGE, RES_RANGE, MAX_ANGLE,
+         MIN_ANGLE, RES_ANGLE);
 
   // 雷达参数
   std::string cameraType;
   nh.param<std::string>("camera_type", cameraType, "KITTI-Camera");
-  parseCameraType(cameraType);
 
   // 订阅话题
   message_filters::Subscriber<sensor_msgs::Image> subLeftImage(
