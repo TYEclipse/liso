@@ -43,3 +43,4 @@ res_angle: 0.8
 
 # 双目相机型号
 camera_type: KITTI-Camera
+left_camera_to_base_pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]

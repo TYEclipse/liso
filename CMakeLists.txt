@@ -38,8 +38,15 @@ target_link_libraries(liso_node
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES}
   ${PCL_LIBRARIES}
-  )
+)
 
+add_executable(sync_node src/sync_node.cpp)
+target_link_libraries(sync_node
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBS}
+  ${CERES_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
 ## Compile as C++11, supported in ROS Kinetic and newer
 # add_compile_options(-std=c++11)
 
