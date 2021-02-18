@@ -1838,6 +1838,7 @@ int main(int argc, char **argv) {
       "/laser_cloud_corner_from_map_pub";
   std::string laser_cloud_surf_from_map_pub = "/laser_cloud_surf_from_map_pub";
 
+  // 传感器参数
   // 雷达参数
   std::string lidarType;
   nh.param<std::string>("lidar_type", lidarType, "HDL-64E");
@@ -1848,13 +1849,25 @@ int main(int argc, char **argv) {
   nh.param<float>("max_angle", MAX_ANGLE, 2);
   nh.param<float>("min_angle", MIN_ANGLE, -24.8);
   nh.param<float>("res_angle", RES_ANGLE, 0.8);
-  printf("%s has %d scans， range [%f,%f]:%f,angle [%f,%f]:%f",
+
+  ROS_INFO("%s has %d scans, range [%f,%f]:%f,angle [%f,%f]:%f",
          lidarType.c_str(), N_SCAN, MAX_RANGE, MIN_RANGE, RES_RANGE, MAX_ANGLE,
          MIN_ANGLE, RES_ANGLE);
 
-  // 雷达参数
+  // 相机参数参数
   std::string cameraType;
   nh.param<std::string>("camera_type", cameraType, "KITTI-Camera");
+
+  // 传感器外参
+  left_camera_to_base_pose =
+      (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
+  right_camera_to_base_pose =
+      (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0);
+  lidar_to_base_pose =
+      (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
+
+  stereoDistanceThresh = 718.856 * 0.54 * 2;
+
 
   // 订阅话题
   message_filters::Subscriber<sensor_msgs::Image> subLeftImage(
@@ -1895,17 +1908,6 @@ int main(int argc, char **argv) {
   pubLaserCloudSurfFromMap =
       nh.advertise<sensor_msgs::PointCloud2>(laser_cloud_surf_from_map_pub, 10);
 
-  // 传感器参数
-  // 相机内参
-  // 传感器外参
-  left_camera_to_base_pose =
-      (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
-  right_camera_to_base_pose =
-      (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0);
-  lidar_to_base_pose =
-      (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
-
-  stereoDistanceThresh = 718.856 * 0.54 * 2;
 
   std::thread preprocess_thread{preprocessThread};
   std::thread odometry_thread{odometryThread};
