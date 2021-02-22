@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <iostream>
 #include <mutex>
+#include <opencv2/core/persistence.hpp>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1857,17 +1858,22 @@ int main(int argc, char **argv) {
   // 相机参数参数
   std::string cameraType;
   nh.param<std::string>("camera_type", cameraType, "KITTI-Camera");
+  nh.param<double>("stereo_distance_thresh", stereoDistanceThresh, 718.856 * 0.54 * 2);
+
+  ROS_INFO("%s has %d scans, DistanceThresh [%f,%f]:%f,angle [%f,%f]:%f",
+         cameraType.c_str(), N_SCAN, MAX_RANGE, MIN_RANGE, RES_RANGE, MAX_ANGLE,
+         MIN_ANGLE, RES_ANGLE);
 
   // 传感器外参
-  left_camera_to_base_pose =
-      (cv::Mat_<double>(3, 4) << 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
-  right_camera_to_base_pose =
-      (cv::Mat_<double>(3, 4) << 1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0);
-  lidar_to_base_pose =
-      (cv::Mat_<double>(3, 4) << 0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08);
-
-  stereoDistanceThresh = 718.856 * 0.54 * 2;
-
+  std::vector<double> left_camera_to_base_pose_tmp;
+  std::vector<double> right_camera_to_base_pose_tmp;
+  std::vector<double> lidar_to_base_pose_tmp;
+  nh.param<std::vector<double>>("left_camera_to_base_pose",left_camera_to_base_pose_tmp,left_camera_to_base_pose_tmp);
+  nh.param<std::vector<double>>("right_camera_to_base_pose",right_camera_to_base_pose_tmp,right_camera_to_base_pose_tmp);
+  nh.param<std::vector<double>>("lidar_to_base_pose",lidar_to_base_pose_tmp,lidar_to_base_pose_tmp);
+  left_camera_to_base_pose = cv::Mat(3,4,CV_64F,left_camera_to_base_pose_tmp.data());
+  right_camera_to_base_pose = cv::Mat(3,4,CV_64F,right_camera_to_base_pose_tmp.data());
+  lidar_to_base_pose = cv::Mat(3,4,CV_64F,lidar_to_base_pose_tmp.data());
 
   // 订阅话题
   message_filters::Subscriber<sensor_msgs::Image> subLeftImage(
