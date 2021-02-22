@@ -43,4 +43,9 @@ res_angle: 0.8
 
 # 双目相机型号
 camera_type: KITTI-Camera
+stereo_distance_thresh: 776
+
+# 传感器外参
 left_camera_to_base_pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+right_camera_to_base_pose: [1, 0, 0, -0.54, 0, 1, 0, 0, 0, 0, 1, 0]
+lidar_to_base_pose: [0, 0, 1, 0.27, -1, 0, 0, 0, 0, -1, 0, -0.08]
